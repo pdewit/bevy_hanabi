@@ -2,14 +2,9 @@
 
 #[cfg(feature = "gpu_tests")]
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::{
-    asset::{AssetIo, AssetIoError, ChangeWatcher, Metadata},
-    prelude::{Quat, Vec2, Vec3, Vec4},
-};
-use std::{
-    ops::Sub,
-    path::{Path, PathBuf},
-};
+
+use bevy::prelude::{Quat, Vec2, Vec3, Vec4};
+use std::ops::Sub;
 
 /// Utility trait to compare floating-point values with a tolerance.
 pub(crate) trait AbsDiffEq {
@@ -107,11 +102,11 @@ macro_rules! assert_approx_eq {
         match (&$left, &$right) {
             (left_val, right_val) => {
                 assert!(
-                    AbsDiffEq::abs_diff_eq(left_val, right_val, 1e-5),
+                    crate::test_utils::AbsDiffEq::abs_diff_eq(left_val, right_val, 1e-5),
                     "assertion failed: expected={} actual={} delta={} tol=1e-5(default)",
                     left_val,
                     right_val,
-                    AbsDiffEq::abs_diff(left_val, right_val),
+                    crate::test_utils::AbsDiffEq::abs_diff(left_val, right_val),
                 );
             }
         }
@@ -120,11 +115,11 @@ macro_rules! assert_approx_eq {
         match (&$left, &$right, &$tol) {
             (left_val, right_val, tol_val) => {
                 assert!(
-                    AbsDiffEq::abs_diff_eq(left_val, right_val, *tol_val),
+                    crate::test_utils::AbsDiffEq::abs_diff_eq(left_val, right_val, *tol_val),
                     "assertion failed: expected={} actual={} delta={} tol={}",
                     left_val,
                     right_val,
-                    AbsDiffEq::abs_diff(left_val, right_val),
+                    crate::test_utils::AbsDiffEq::abs_diff(left_val, right_val),
                     tol_val
                 );
             }
@@ -203,44 +198,5 @@ impl MockRenderer {
     /// Get the Bevy render queue of the mock renderer.
     pub fn queue(&self) -> RenderQueue {
         self.queue.clone()
-    }
-}
-
-/// A dummy asset IO, just to satisfy the `AssetServer` requirements.
-/// This implementation does nothing.
-pub(crate) struct DummyAssetIo {}
-
-impl AssetIo for DummyAssetIo {
-    fn load_path<'a>(
-        &'a self,
-        _path: &'a Path,
-    ) -> bevy::utils::BoxedFuture<'a, anyhow::Result<Vec<u8>, AssetIoError>> {
-        Box::pin(async move {
-            let bytes = Vec::new();
-            Ok(bytes)
-        })
-    }
-
-    fn read_directory(
-        &self,
-        _path: &Path,
-    ) -> Result<Box<dyn Iterator<Item = PathBuf>>, AssetIoError> {
-        Ok(Box::new(Vec::<PathBuf>::new().into_iter()))
-    }
-
-    fn watch_path_for_changes(
-        &self,
-        _to_watch: &Path,
-        _to_reload: Option<PathBuf>,
-    ) -> Result<(), AssetIoError> {
-        Ok(())
-    }
-
-    fn watch_for_changes(&self, _watcher: &ChangeWatcher) -> Result<(), AssetIoError> {
-        Ok(())
-    }
-
-    fn get_metadata(&self, _path: &Path) -> Result<Metadata, AssetIoError> {
-        Ok(Metadata::new(bevy::asset::FileType::File))
     }
 }

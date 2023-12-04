@@ -12,7 +12,7 @@
 use bevy::{
     core_pipeline::tonemapping::Tonemapping, log::LogPlugin, prelude::*, render::mesh::shape::Cube,
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use rand::Rng;
 
 use bevy_hanabi::prelude::*;
@@ -171,13 +171,22 @@ impl InstanceManager {
 
 fn main() {
     App::default()
-        .add_plugins(DefaultPlugins.set(LogPlugin {
-            level: bevy::log::Level::WARN,
-            filter: "bevy_hanabi=warn,instancing=trace".to_string(),
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(LogPlugin {
+                    level: bevy::log::Level::WARN,
+                    filter: "bevy_hanabi=warn,instancing=trace".to_string(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — instancing".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .insert_resource(InstanceManager::new(5, 4))
         .add_systems(Startup, setup)
         .add_systems(Update, (bevy::window::close_on_esc, keyboard_input_system))
@@ -221,21 +230,29 @@ fn setup(
 
     let writer = ExprWriter::new();
 
+    let age = writer.lit(0.).expr();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, age);
+
     let lifetime = writer.lit(12.).expr();
-    let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(1.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let init_vel = SetVelocitySphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        speed: writer.lit(2.).expr(),
+    };
 
     let effect = effects.add(
         EffectAsset::new(512, Spawner::rate(50.0.into()), writer.finish())
             .with_name("instancing")
-            .init(InitPositionSphereModifier {
-                center: Vec3::ZERO,
-                radius: 1.,
-                dimension: ShapeDimension::Volume,
-            })
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: 2.0.into(),
-            })
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
             .init(init_lifetime)
             .render(ColorOverLifetimeModifier { gradient }),
     );

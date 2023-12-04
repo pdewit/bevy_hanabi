@@ -7,7 +7,7 @@ use bevy::{
         view::RenderLayers, RenderPlugin,
     },
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use std::f32::consts::PI;
 
 use bevy_hanabi::prelude::*;
@@ -24,13 +24,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DefaultPlugins
                 .set(LogPlugin {
                     level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,spawn=trace".to_string(),
+                    filter: "bevy_hanabi=warn,gradient=trace".to_string(),
                 })
-                .set(RenderPlugin { wgpu_settings }),
+                .set(RenderPlugin {
+                    render_creation: wgpu_settings.into(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — gradient".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
         )
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Update, (bevy::window::close_on_esc, update))
         .run();
@@ -64,31 +72,40 @@ fn setup(
     let texture_handle: Handle<Image> = asset_server.load("cloud.png");
 
     let mut gradient = Gradient::new();
-    gradient.add_key(0.0, Vec4::splat(1.0));
-    gradient.add_key(0.1, Vec4::new(1.0, 1.0, 0.0, 1.0));
-    gradient.add_key(0.4, Vec4::new(1.0, 0.0, 0.0, 1.0));
+    gradient.add_key(0.0, Vec4::new(0.5, 0.5, 0.5, 1.0));
+    gradient.add_key(0.1, Vec4::new(0.5, 0.5, 0.0, 1.0));
+    gradient.add_key(0.4, Vec4::new(0.5, 0.0, 0.0, 1.0));
     gradient.add_key(1.0, Vec4::splat(0.0));
 
     let writer = ExprWriter::new();
 
+    let age = writer.lit(0.).expr();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, age);
+
     let lifetime = writer.lit(5.).expr();
-    let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(1.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let init_vel = SetVelocitySphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        speed: writer.lit(2.).expr(),
+    };
 
     let effect = effects.add(
         EffectAsset::new(32768, Spawner::rate(1000.0.into()), writer.finish())
             .with_name("gradient")
-            .init(InitPositionSphereModifier {
-                center: Vec3::ZERO,
-                radius: 1.,
-                dimension: ShapeDimension::Volume,
-            })
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: 2.0.into(),
-            })
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
             .init(init_lifetime)
             .render(ParticleTextureModifier {
                 texture: texture_handle.clone(),
+                sample_mapping: ImageSampleMapping::ModulateOpacityFromR,
             })
             .render(ColorOverLifetimeModifier { gradient }),
     );
@@ -150,8 +167,9 @@ fn lemniscate(time: f32, radius: f32) -> Vec2 {
     let sign = theta.cos().signum();
     let theta = theta.sin() * PI_OVER_4;
 
-    // Solve the polar equation to build the parametric position
-    let r2 = radius * radius * (theta * 2.0).cos();
+    // Solve the polar equation to build the parametric position. Clamp to positive
+    // values for r2 due to numerical errors infrequently yielding negative values.
+    let r2 = (radius * radius * (theta * 2.0).cos()).max(0.);
     let r = r2.sqrt().copysign(sign);
 
     // Convert to cartesian coordinates

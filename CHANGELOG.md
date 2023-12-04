@@ -3,7 +3,82 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
+
+### Added
+
+- Added a new `EffectProperties` component holding the runtime values for all properties of a single `ParticleEffect` instance. This component can be added manually to the same `Entity` holding the `ParticleEffect` if you want to set initial values different from the default ones declared in the `EffectAsset`. Otherwise Hanabi will add the component automatically.
+- Added a new `EffectSystems::UpdatePropertiesFromAsset` set running in the `PostUpdate` schedule. During this set, Hanabi automatically updates all `EffectProperties` if the properties declared in the underlying `EffectAsset` changed.
+- Added `OrientModifier::rotation`, an optional expression which allows rotating the particle within its oriented plane. The actual meaning depends on the `OrientMode` used. (#258)
+- Added 4 new scalar float attributes `F32_0` to `F32_3`, which have no specified meaning but instead can be used to store any per-particle value.
+- Added 4 new expressions for packing and unpacking a `vec4<f32>` into a `u32`: `pack4x8snorm`, `pack4x8unorm`, `unpack4x8snorm`, `unpack4x8unorm`. This is particularly useful to convert between `COLOR` (`u32`) and `HDR_COLOR` (`vec4<f32>`). See the `billboard.rs` example for a use case. (#259)
+
+### Changed
+
+- Properties of an effect have been moved from `CompiledParticleEffect` to a new `EffectProperties` component. This splits the semantic of the `CompiledParticleEffect`, which is purely an internal optimization, from the list of properties stored in `EffectProperties`, which is commonly accessed by the user to assign new values to properties.
+- Thanks to the split of properties into `EffectProperties`, change detection now works on properties, and uploads to GPU will only occur when change detection triggered on the component. Previously properties were re-uploaded each frame to the GPU even if unchanged.
+- Effect properties are now reflected (via the new `EffectProperties` component).
+- `Attribute::ALL` is now private; use `Attribute::all()` instead.
+
+## [0.8.0] 2023-11-08
+
+### Added
+
+- Added a new `OrientModifier` and its `OrientMode`, allowing various modes of particle orienting during the rendering phase.
+- Added `SimulationSpace::Local` to simulate particles in local effect space, before rendering them with the `GlobalTransform` of the effect's entity.
+- Add access to `ModifierContext` and `ParticleLayout` from the `EvalContext` when evaluating modifiers.
+- Added `SimulationSpace::eval()` to evaluate a context-specific expression allowing to transform the particles to the proper simulation space.
+- Added a few more functions to `Gradient<T>`: `is_empty(` and `len()` which do as implied, `from_keys()` which creates a new gradient from a key point iterator, and `with_key()` and `with_keys()` which append one or more keys to an existing gradient.
+- Added `AlphaMode` and the ability to render particles with alpha masking instead of alpha blending. This is controlled by `EffectAsset::alpha_mode` and the new `EffectAsset::with_alpha_mode()` helper.
+- Added a new `BuiltInOperator::AlphaCutoff` value and associated expression, which represent the alpha cutoff threshold when rendering an effect with alpha masking. The `billboard` example has been updated to show how to use that value, and even dynamically change it with an expression.
+- Added `PropertyLayout::properties()` to iterate over the layout.
+- Added `From` implementations for the most common matrix types.
+- Added many more expressions to `Expr`.
+- Added `Expr::has_side_effect()` to determine if an expression has a side effect and therefore needs to be stored into a temporary local variable to avoid being evaluated more than once.
+- Added `EvalContext::make_local_var()` to generate a unique name for a variable local to an `EvalContext` (generally, inside a function).
+- Added `EvalContext::push_stmt()` to emit a single statement prepended to the currently evaluating expression. This is useful to define temporary local variables for storing expressions with a side-effect.
+- Added `EvalContext::make_fn()` to create a function with a dedicated `EvalContext`, allowing to properly scope local variables and stored expression side effects.
+- Added `Module::try_get()`, similar to `Module::get()` but returning a `Result<&Expr, ExprError>` instead for convenience.
+- Added implementations of `ToWgslString` for the missing vector types (`UVec2/3/4`, `IVec2/3/4`, `BVec2/3/4`).
+- Added new `CastExpr` expression to cast an operand expression to another `ValueType`. This adds a new variant `Expr::Cast` too.
+- Added new `BinaryOperator::Remainder` to calculate the remainder (`%` operator) of two expressions.
+- Added the `ImageSampleMapping` enum to determine how samples of the image of a `ParticleTextureModifier` are mapped to and modulated with the particle's base color. The new default behavior is `ImageSampleMapping::Modulate`, corresponding to a full modulate of all RGBA components. To restore the previous behavior, and use the Red channel of the texture as an opacity mask, set `ParticleTextureModifier::sample_mapping` to `ImageSampleMapping::ModulateOpacityFromR`.
+- Added new `FlipbookModifier` to treat the image of a `ParticleTextureModifier` as a grid sprite sheet, and allow rendering a sprite from that sheet. By animating the selected sprite, this creates a flipbook animation for the particle.
+- Added new `Attribute::SPRITE_INDEX` holding the `i32` index of a sprite inside a sprite sheet texture. This is used with the `FlipbookModifier` to render sprite-based animated particles.
+
+### Changed
+
+- Compatible with Bevy 0.12
+- `InitContext::new()` and `UpdateContext::new()` now take an additional reference to the `ParticleLayout` of the effect.
+- `RenderContext` now implements `EvalContext` like the init and update contexts, and like them reference the module, particle layout, and property layout of the effect.
+- `Gradient<T>::new()`, `Gradient<T>::constant()`, and `Gradient<T>::linear()` do not require the `T: Default` trait bound anymore. The bound had been added by mistake, and is not necessary.
+- `Gradient<T>::new()` is now a `const fn`.
+- `Gradient<T>::constant()` and `Gradient<T>::linear()` do not attempt to perform linear searches anymore; instead they directly create the `Gradient<T>` object from scratch. This should not have any real consequence in practice though.
+- Changed `CompiledParticleEffect` to store a `LayoutFlags` instead of individual boolean values, for convenience and consistency with the internal representation.
+- Changed `RenderContext` to implement `EvalContext`. This allows render modifiers to use the expression API.
+- `PropertyLayout::generate_code()` has no more extra empty line at the end of the struct in the generated code.
+- `EvalContext::eval()` now caches the evaluation of an `ExprHandle` and guarantees that the evaluation is only ever performed once. This ensures that cloned `ExprHandle` making a same expression used in multiple places all reference the same evaluation, which is stored inside a local variable. This fixes an unexpected behavior where expressions with side effect like `rand()` where emitted multiple times, leading to different values, even though a single expression was used (via cloned handles). To restore the old behavior, simply generating separate expressions from a `Module` or an `ExprWriter` instead of cloning and reusing a same `ExprHandle`.
+- The default texture sampling mode for `ParticleTextureModifier` is now a full RGBA modulate. See `ImageSampleMapping` for details. Use `ImageSampleMapping::ModulateOpacityFromR` to restore the previous behavior.
+
+### Removed
+
+- Removed the `BillboardModifier`; this is superseded by the `OrientModifier { mode: OrientMode::ParallelCameraDepthPlane }`.
+- Removed the `OrientAlongVelocityModifier`; this is superseded by the `OrientModifier { mode: OrientMode::AlongVelocity }`.
+- Removed `module()` and `expr()` from `EvalContext`; the current module is now passed explicitly alongside the `EvalContext` in functions such as `EvalContext::eval()`.
+
+### Fixed
+
+- Render modifiers can now access simulation parameters (time, delta time) like in any other context.
+- Fixed a panic in Debug builds when a `ParticleEffect` was marked as changed (for example, via `Mut`) but the asset handle remained the same. (#228)
+- Fixed a bug in the `to_wgsl_string` impl of `MatrixType` that caused the first element to be added twice.
+- Fixed missing parentheses leading to incorrect operator order in the following modifiers depending on the expression(s) used:
+  - `SetPositionCircleModifier`
+  - `SetPositionSphereModifier`
+  - `SetVelocityCircleModifier`
+  - `SetVelocitySphereModifier`
+  - `SetVelocityTangentModifier`
+
+## [0.7.0] 2023-07-17
 
 ### Added
 
@@ -16,39 +91,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the property layout of the efect. The trait is implemented by `InitContext` and `UpdateContext`.
 - Added convenience method `PropertyLayout::contains()` to determine if a layout contains a property by name.
 - Added `SetSizeModifier::screen_space_size` and `SizeOverLifetimeModifier::screen_space_size` boolean fields which change the behavior of the particle size to be expressed in screen-space logical pixels, independently of the camera projection. This enables creating particle effect with constant pixel size. Set `screen_space_size = false` to get the previous behavior.
+- Added a new utility trait `FloatHash` to allow implementing `std::cmp::Eq` and `std::hash::Hash` on floating-point variants of `CpuValue` (ex-`spawn::Value`), making it possible to derive `std::hash::Hash` for any type using `CpuValue`.
+- `SetColorModifier` and `SetSizeModifier` now implement `std::cmp::Eq`, thanks to `CpuValue` itself implementing that trait for all floating point types (see `FloatHash`).
+- Added a new `KillSphereModifier`, similar to `KillAabbModifier` but with a sphere shape.
 
 ### Changed
 
+- Renamed `spawn::Value` to `spawn::CpuValue` to prevent confusion with `graph::Value`. The former is a legacy construct which should eventually be replaced by the latter (but cannot be yet).
 - `ValueType` is now one of `ScalarType` / `VectorType` / `MatrixType`, allowing to represent a wider range of types, including booleans and matrices.
 - `graph::Value` is now one of `ScalarValue` / `VectorValue` / `MatrixValue`, for consistency with `ValueType`.
 - `SimParams::dt` was renamed to `SimParams::delta_time` for readability. Inside shaders, `sim_params.dt` was also renamed to `sim_params.delta_time`.
 - `InitContext` and `UpdateContext` now hold a mutable reference to the underlying `Module` to allow modifiers to create new `Expr`,
   and a read-only reference to the property layout of the effect.
-- `InitModifier::apply()` and `UpdateModifier::apply()` now return a `Result<(), ExprError>`.
-- The following modifiers changed to leverage the new Expression API:
-  - `InitAttributeModifier`:
-    - `value` field is now an `ExprHandle`.
-    - The modifier is `Copy`-able.
-  - `AccelModifier`:
-    - `accel` field is now an `ExprHandle`.
-    - The modifier is `Copy`-able.
-    - `AccelModifier::constant()` takes a `&mut Module` argument to create the literal expression assigned to the `accel` field.
-    - `AccelModifier::via_property()` takes a `&mut Module` argument to create the property expression assigned to the `accel` field.
-  - `LinearDragModifier`:
-    - `drag` field is now an `ExprHandle`.
-  - `AabbKillModifier`:
-    - `center` and `half_size` fields are now `ExprHandle`.
+- `ModifierContext` is now a bitfield (flags), allowing modifiers to be used in multiple contexts. A prime example is the renamed `SetAttributeModifier` which can be used both to initialize a particle attribute on spawn (if used in the `Init` context), or update it during the simulation (if used in the `Update` context). Adding the modifier to the `EffectAsset` with `init()` or `update()` determines in which context it's used.
+- `InitModifier::apply()` was renamed to `InitModifier::apply_init()` to avoid a conflict with the other modifier traits in case a modifier implements multiple of them.
+- `UpdateModifier::apply()` was renamed to `UpdateModifier::apply_update()` to avoid a conflict with the other modifier traits in case a modifier implements multiple of them.
+- `RenderModifier::apply()` was renamed to `RenderModifier::apply_render()` to avoid a conflict with the other modifier traits in case a modifier implements multiple of them.
+- `InitModifier::apply_init()` and `UpdateModifier::apply_update()` now return a `Result<(), ExprError>`.
+- The following modifiers have been renamed, changing their `Init` prefix into `Set` to reflect the fact they can now be used both for particle init and update:
+  - `InitAttributeModifier` -> `SetAttributeModifier`
+  - `InitPositionCircleModifier` -> `SetPositionCircleModifier`
+  - `InitPositionSphereModifier` -> `SetPositionSphereModifier`
+  - `InitPositionCone3dModifier` -> `SetPositionCone3dModifier`
+  - `InitVelocityCircleModifier` -> `SetVelocityCircleModifier`
+  - `InitVelocitySphereModifier` -> `SetVelocitySphereModifier`
+  - `InitVelocityTangentModifier` -> `SetVelocityTangentModifier`
+- All modifiers were changed to leverage the new Expression API. This means most fields are now of type `ExprHandle` instead of their previous numeric type (like `Vec3` or `f32`). Refer to the various examples and the migration guide to understand how to migrate those modifiers.
 - `Property::new()` takes a `default_value` argument as `impl Into<Value>` instead of `Value`. This should make it easier to call, without requiring any change to existing code.
 - `PropertyLayout::new()` takes an `iter` argument as `impl IntoIterator` instead of `impl Iterator`. This should make it easier to call, without requiring any change to existing code.
 - All `ParticleEffect`s are now compiled into a `CompiledParticleEffect` as soon as Hanabi detects they were spawned (generally, same frame), irrespective of whether they are visible or not. Previously only effects with `Visibility::Visible` where compiled, causing inconsistencies and panics when the effect was made visible later.
+- Shaders are now named (as required by Bevy 0.11), allowing better error reporting. Because Hanabi shaders are generated, the naming pattern used is `hanabi/<effect_name>_<hash>.wgsl`, where `<effect_name>` is the value of `EffectAsset::name`, and `<hash>` a unique hash depending on the content of the effect (modifiers and their values).
+- The content of the `modifier` module has been re-organized to group modifiers into submodules based on the part they modify. This means the `init`, `update`, and `render`, sub-modules are gone, replaced with others. Because all modifiers are re-exported (flattened hierarchy), this generally should not cause any breaking change, but can occasionally create a breakage if some old code was qualifying them with their full module path.
 
 ### Removed
 
-- The `InitAgeModifier` and `InitLifetimeModifier` were deleted. They're replaced with the more generic `InitAttributeModifier` which can initialize any attribute of the particle.
+- The `InitAgeModifier`, `InitLifetimeModifier`, and `InitSizeModifier`, were deleted. They're replaced with the more generic `SetAttributeModifier` (ex-`InitAttributeModifier`) which can set any attribute of a particle.
+- `Modifier::resolve_properties()` was a temporary workaround which has now been entirely made obsolete, and as a result has been deleted.
+- Deleted `DimValue` which was only used by `InitSizeModifier`, and is more generally covered by the Expression API.
+- Deleted `ValueOrProperty` which is now unused, and is more generally covered by the Expression API.
 
 ### Fixed
 
 - Fixed a bug where a `ParticleEffect` spawned hidden (with `Visibility::Hidden`) would make Hanabi panic when made visible. Effects are now always compiled as soon as spawned. (#182)
+- Fixed the implementation of `std::hash::Hash` for `SetColorModifier` and `SetSizeModifier`, which were manually implemented and were not hashing the variant type of the value. This increased the risk of hash collision. The new implementation is derived thanks to `CpuValue` itself now implementing `std::hash::Hash`, and therefore likely hashes to a different value than in the previous release.
 
 ## [0.6.2] 2023-06-10
 

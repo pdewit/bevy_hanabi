@@ -7,14 +7,18 @@ use bevy::{
 use bevy::{
     asset::{AssetLoader, LoadContext, LoadedAsset},
     utils::BoxedFuture,
+    asset::{io::Reader, Asset, AssetLoader, AsyncReadExt, LoadContext},
+    reflect::{Reflect, TypeUuid},
+    utils::{default, thiserror::Error, BoxedFuture, HashSet},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     graph::Value,
-    modifier::{init::InitModifier, render::RenderModifier, update::UpdateModifier},
-    BoxedModifier, Module, ParticleLayout, Property, PropertyLayout, SimulationSpace, Spawner,
+    modifier::{InitModifier, RenderModifier, UpdateModifier},
+    BoxedModifier, ExprHandle, Module, ParticleLayout, Property, PropertyLayout, SimulationSpace,
+    Spawner,
 };
 
 /// Type of motion integration applied to the particles of a system.
@@ -47,18 +51,25 @@ pub enum MotionIntegration {
 pub enum SimulationCondition {
     /// Simulate the effect only when visible.
     ///
-    /// The visibility is determined by the [`Visibility`] and
-    /// [`ComputedVisibility`] components.
+    /// The visibility is determined by the [`Visibility`], the
+    /// [`InheritedVisibility`], and the [`ViewVisibility`] components.
     ///
     /// This is the default for all assets, and is the most performant option,
     /// allowing to have many effects in the scene without the need to simulate
     /// all of them if they're not visible.
     ///
-    /// Note: AABB culling is not currently available. Only boolean ON/OFF
-    /// visibility is used.
+    /// Note that any [`ParticleEffect`] spawned is always compiled into a
+    /// [`CompiledParticleEffect`], even when it's not visible and even when
+    /// that variant is selected.
+    ///
+    /// Note also that AABB culling is not currently available. Only boolean
+    /// ON/OFF visibility is used.
     ///
     /// [`Visibility`]: bevy::render::view::Visibility
-    /// [`ComputedVisibility`]: bevy::render::view::ComputedVisibility
+    /// [`InheritedVisibility`]: bevy::render::view::InheritedVisibility
+    /// [`ViewVisibility`]: bevy::render::view::ViewVisibility
+    /// [`ParticleEffect`]: crate::ParticleEffect
+    /// [`CompiledParticleEffect`]: crate::CompiledParticleEffect
     #[default]
     WhenVisible,
 
@@ -72,14 +83,92 @@ pub enum SimulationCondition {
     /// should be aware of the performance implications of using this
     /// condition, and only use it when strictly necessary.
     ///
-    /// Any [`Visibility`] or [`ComputedVisibility`] component is ignored. You
-    /// may want to spawn the particle effect components manually instead of
-    /// using the [`ParticleEffectBundle`] to avoid adding those components.
+    /// Any [`Visibility`], [`InheritedVisibility`], or [`ViewVisibility`]
+    /// component is ignored. You may want to spawn the particle effect
+    /// components manually instead of using the [`ParticleEffectBundle`] to
+    /// avoid adding those components.
     ///
     /// [`Visibility`]: bevy::render::view::Visibility
-    /// [`ComputedVisibility`]: bevy::render::view::ComputedVisibility
+    /// [`InheritedVisibility`]: bevy::render::view::InheritedVisibility
+    /// [`ViewVisibility`]: bevy::render::view::ViewVisibility
     /// [`ParticleEffectBundle`]: crate::ParticleEffectBundle
     Always,
+}
+
+/// Alpha mode for rendering an effect.
+///
+/// The alpha mode determines how the alpha value of a particle is used to
+/// render it. In general effects use semi-transparent particles. However, there
+/// are multiple alpha blending techniques available, producing different
+/// results.
+///
+/// This is very similar to the `bevy::pbr::AlphaMode` of the `bevy_pbr` crate,
+/// except that a different set of values is supported which reflects what this
+/// library currently supports.
+///
+/// The alpha mode only affects the render phase that particles are rendered
+/// into when rendering 3D views. For 2D views, all particle effects are
+/// rendered during the [`Transparent2d`] render phase.
+///
+/// [`Transparent2d`]: bevy::core_pipeline::core_2d::Transparent2d
+#[derive(Debug, Default, Clone, Copy, PartialEq, Reflect, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AlphaMode {
+    /// Render the effect with alpha blending.
+    ///
+    /// This is the most common mode for handling transparency. It uses the
+    /// "blend" or "over" formula, where the color of each particle fragment is
+    /// accumulated into the destination render target after being modulated by
+    /// its alpha value.
+    ///
+    /// ```txt
+    /// dst_color = src_color * (1 - particle_alpha) + particle_color * particle_alpha;
+    /// dst_alpha = src_alpha * (1 - particle_alpha) + particle_alpha
+    /// ```
+    ///
+    /// This is the default blending mode.
+    ///
+    /// For 3D views, effects with this mode are rendered during the
+    /// [`Transparent3d`] render phase.
+    ///
+    /// [`Transparent3d`]: bevy::core_pipeline::core_3d::Transparent3d
+    #[default]
+    Blend,
+
+    /// Render the effect with alpha masking.
+    ///
+    /// With this mode, the final alpha value computed per particle fragment is
+    /// compared against the cutoff value stored in this enum. Any fragment
+    /// with a value under the cutoff is discarded, while any fragment with
+    /// a value equal or over the cutoff becomes fully opaque. The end result is
+    /// an opaque particle with a cutout shape.
+    ///
+    /// ```txt
+    /// if src_alpha >= cutoff {
+    ///     dst_color = particle_color;
+    ///     dst_alpha = 1;
+    /// } else {
+    ///     discard;
+    /// }
+    /// ```
+    ///
+    /// The assigned expression must yield a scalar floating-point value,
+    /// typically in the \[0:1\] range. This expression is assigned at the
+    /// beginning of the fragment shader to the special built-in `alpha_cutoff`
+    /// variable, which can be further accessed and modified by render
+    /// modifiers.
+    ///
+    /// The cutoff threshold comparison of the fragment's alpha value against
+    /// `alpha_cutoff` is performed as the last operation in the fragment
+    /// shader. This allows modifiers to affect the alpha value of the
+    /// particle before it's tested against the cutoff value stored in
+    /// `alpha_cutoff`.
+    ///
+    /// For 3D views, effects with this mode are rendered during the
+    /// [`AlphaMask3d`] render phase.
+    ///
+    /// [`AlphaMask3d`]: bevy::core_pipeline::core_3d::AlphaMask3d
+    Mask(ExprHandle),
 }
 
 /// Asset describing a visual effect.
@@ -123,10 +212,18 @@ pub struct EffectAsset {
     pub simulation_space: SimulationSpace,
     /// Condition under which the effect is simulated.
     pub simulation_condition: SimulationCondition,
-    /// Modifiers defining the effect.
+    /// Init modifier defining the effect.
     #[reflect(ignore)]
     // TODO - Can't manage to implement FromReflect for BoxedModifier in a nice way yet
-    modifiers: Vec<BoxedModifier>,
+    init_modifiers: Vec<BoxedModifier>,
+    /// update modifiers defining the effect.
+    #[reflect(ignore)]
+    // TODO - Can't manage to implement FromReflect for BoxedModifier in a nice way yet
+    update_modifiers: Vec<BoxedModifier>,
+    /// Render modifiers defining the effect.
+    #[reflect(ignore)]
+    // TODO - Can't manage to implement FromReflect for BoxedModifier in a nice way yet
+    render_modifiers: Vec<BoxedModifier>,
     /// Properties of the effect.
     ///
     /// Properties must have a unique name. Manually adding two or more
@@ -141,6 +238,8 @@ pub struct EffectAsset {
     pub motion_integration: MotionIntegration,
     /// Expression module for this effect.
     module: Module,
+    /// Alpha mode.
+    pub alpha_mode: AlphaMode,
 }
 
 impl EffectAsset {
@@ -186,7 +285,7 @@ impl EffectAsset {
     ///
     /// // Create a modifier that initialized the particle lifetime to 10 seconds.
     /// let lifetime = module.lit(10.); // literal value "10.0"
-    /// let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    /// let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
     ///
     /// let effect = EffectAsset::new(32768, spawner, module);
     /// ```
@@ -195,16 +294,10 @@ impl EffectAsset {
     /// [`Expr`]: crate::graph::expr::Expr
     pub fn new(capacity: u32, spawner: Spawner, module: Module) -> Self {
         Self {
-            name: String::new(),
             capacity,
             spawner,
-            z_layer_2d: 0.,
-            simulation_space: SimulationSpace::default(),
-            simulation_condition: SimulationCondition::default(),
-            modifiers: vec![],
-            properties: vec![],
-            motion_integration: MotionIntegration::default(),
             module,
+            ..default()
         }
     }
 
@@ -254,7 +347,15 @@ impl EffectAsset {
         self
     }
 
+    /// Set the alpha mode.
+    pub fn with_alpha_mode(mut self, alpha_mode: AlphaMode) -> Self {
+        self.alpha_mode = alpha_mode;
+        self
+    }
+
     /// Add a new property to the asset.
+    ///
+    /// See [`Property`] for more details on what effect properties are.
     ///
     /// # Panics
     ///
@@ -265,6 +366,8 @@ impl EffectAsset {
     }
 
     /// Add a new property to the asset.
+    ///
+    /// See [`Property`] for more details on what effect properties are.
     ///
     /// # Panics
     ///
@@ -282,64 +385,49 @@ impl EffectAsset {
 
     /// Add an initialization modifier to the effect.
     ///
-    /// # Panics
-    ///
-    /// Panics if the modifier references a property which doesn't exist.
-    /// You should declare an effect property first with [`with_property()`]
-    /// or [`add_property()`], before adding any modifier referencing it.
-    ///
     /// [`with_property()`]: crate::EffectAsset::with_property
     /// [`add_property()`]: crate::EffectAsset::add_property
-    pub fn init<M>(mut self, mut modifier: M) -> Self
+    #[inline]
+    pub fn init<M>(mut self, modifier: M) -> Self
     where
         M: InitModifier + Send + Sync + 'static,
     {
-        modifier.resolve_properties(&self.properties);
-        self.modifiers.push(Box::new(modifier));
+        self.init_modifiers.push(Box::new(modifier));
         self
     }
 
     /// Add an update modifier to the effect.
     ///
-    /// # Panics
-    ///
-    /// Panics if the modifier references a property which doesn't exist.
-    /// You should declare an effect property first with [`with_property()`]
-    /// or [`add_property()`], before adding any modifier referencing it.
-    ///
     /// [`with_property()`]: crate::EffectAsset::with_property
     /// [`add_property()`]: crate::EffectAsset::add_property
-    pub fn update<M>(mut self, mut modifier: M) -> Self
+    #[inline]
+    pub fn update<M>(mut self, modifier: M) -> Self
     where
         M: UpdateModifier + Send + Sync + 'static,
     {
-        modifier.resolve_properties(&self.properties);
-        self.modifiers.push(Box::new(modifier));
+        self.update_modifiers.push(Box::new(modifier));
         self
     }
 
     /// Add a render modifier to the effect.
     ///
-    /// # Panics
-    ///
-    /// Panics if the modifier references a property which doesn't exist.
-    /// You should declare an effect property first with [`with_property()`]
-    /// or [`add_property()`], before adding any modifier referencing it.
-    ///
     /// [`with_property()`]: crate::EffectAsset::with_property
     /// [`add_property()`]: crate::EffectAsset::add_property
-    pub fn render<M>(mut self, mut modifier: M) -> Self
+    #[inline]
+    pub fn render<M>(mut self, modifier: M) -> Self
     where
         M: RenderModifier + Send + Sync + 'static,
     {
-        modifier.resolve_properties(&self.properties);
-        self.modifiers.push(Box::new(modifier));
+        self.render_modifiers.push(Box::new(modifier));
         self
     }
 
     /// Get a list of all the modifiers of this effect.
-    pub fn modifiers(&self) -> &[BoxedModifier] {
-        &self.modifiers[..]
+    pub fn modifiers(&self) -> impl Iterator<Item = &BoxedModifier> {
+        self.init_modifiers
+            .iter()
+            .chain(self.update_modifiers.iter())
+            .chain(self.render_modifiers.iter())
     }
 
     /// Get a list of all the init modifiers of this effect.
@@ -349,7 +437,7 @@ impl EffectAsset {
     ///
     /// [`ModifierContext::Init`]: crate::ModifierContext::Init
     pub fn init_modifiers(&self) -> impl Iterator<Item = &dyn InitModifier> {
-        self.modifiers.iter().filter_map(|m| m.as_init())
+        self.init_modifiers.iter().filter_map(|m| m.as_init())
     }
 
     /// Get a list of all the update modifiers of this effect.
@@ -359,7 +447,7 @@ impl EffectAsset {
     ///
     /// [`ModifierContext::Update`]: crate::ModifierContext::Update
     pub fn update_modifiers(&self) -> impl Iterator<Item = &dyn UpdateModifier> {
-        self.modifiers.iter().filter_map(|m| m.as_update())
+        self.update_modifiers.iter().filter_map(|m| m.as_update())
     }
 
     /// Get a list of all the render modifiers of this effect.
@@ -369,7 +457,7 @@ impl EffectAsset {
     ///
     /// [`ModifierContext::Render`]: crate::ModifierContext::Render
     pub fn render_modifiers(&self) -> impl Iterator<Item = &dyn RenderModifier> {
-        self.modifiers.iter().filter_map(|m| m.as_render())
+        self.render_modifiers.iter().filter_map(|m| m.as_render())
     }
 
     /// Build the particle layout of the asset based on its modifiers.
@@ -380,7 +468,7 @@ impl EffectAsset {
     pub fn particle_layout(&self) -> ParticleLayout {
         // Build the set of unique attributes required for all modifiers
         let mut set = HashSet::new();
-        for modifier in &self.modifiers {
+        for modifier in self.modifiers() {
             for &attr in modifier.attributes() {
                 set.insert(attr);
             }
@@ -405,20 +493,42 @@ impl EffectAsset {
 }
 
 #[cfg(feature = "serde")]
+/// Asset loader for [`EffectAsset`].
+///
+/// Effet assets take the `.effect` extension.
 #[derive(Default)]
 pub struct EffectAssetLoader;
 
-#[cfg(feature = "serde")]
+/// Error for the [`EffectAssetLoader`] loading an [`EffectAsset`].
+#[derive(Error, Debug)]
+pub enum EffectAssetLoaderError {
+    /// I/O error reading the asset source.
+    #[error("An IO error occurred during loading of a particle effect")]
+    Io(#[from] std::io::Error),
+
+    /// Error during RON format parsing.
+    #[error("A RON format error occurred during loading of a particle effect")]
+    Ron(#[from] ron::error::SpannedError),
+}
+
 impl AssetLoader for EffectAssetLoader {
+    type Asset = EffectAsset;
+
+    type Settings = ();
+
+    type Error = EffectAssetLoaderError;
+
     fn load<'a>(
         &'a self,
-        bytes: &'a [u8],
-        load_context: &'a mut LoadContext,
-    ) -> BoxedFuture<'a, Result<(), anyhow::Error>> {
+        reader: &'a mut Reader,
+        _settings: &'a Self::Settings,
+        _load_context: &'a mut LoadContext,
+    ) -> BoxedFuture<'a, Result<Self::Asset, Self::Error>> {
         Box::pin(async move {
-            let custom_asset = ron::de::from_bytes::<EffectAsset>(bytes)?;
-            load_context.set_default_asset(LoadedAsset::new(custom_asset));
-            Ok(())
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            let custom_asset = ron::de::from_bytes::<EffectAsset>(&bytes)?;
+            Ok(custom_asset)
         })
     }
 
@@ -466,57 +576,84 @@ mod tests {
     #[test]
     fn test_apply_modifiers() {
         let mut module = Module::default();
+        let one = module.lit(1.);
+        let init_age = SetAttributeModifier::new(Attribute::AGE, one);
+        let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, one);
+        let init_pos_sphere = SetPositionSphereModifier {
+            center: module.lit(Vec3::ZERO),
+            radius: module.lit(1.),
+            dimension: ShapeDimension::Volume,
+        };
+        let init_vel_sphere = SetVelocitySphereModifier {
+            center: module.lit(Vec3::ZERO),
+            speed: module.lit(1.),
+        };
+
         let effect = EffectAsset {
             name: "Effect".into(),
             capacity: 4096,
             spawner: Spawner::rate(30.0.into()),
             ..Default::default()
         }
-        .init(InitPositionSphereModifier::default())
-        .init(InitVelocitySphereModifier::default())
+        .init(init_pos_sphere)
+        .init(init_vel_sphere)
         //.update(AccelModifier::default())
         .update(LinearDragModifier::new(module.lit(1.)))
         .update(ForceFieldModifier::default())
         .render(ParticleTextureModifier::default())
         .render(ColorOverLifetimeModifier::default())
         .render(SizeOverLifetimeModifier::default())
-        .render(BillboardModifier::default());
+        .render(OrientModifier::new(OrientMode::ParallelCameraDepthPlane))
+        .render(OrientModifier::new(OrientMode::FaceCameraPosition))
+        .render(OrientModifier::new(OrientMode::AlongVelocity));
 
         assert_eq!(effect.capacity, 4096);
 
-        let one = module.lit(1.);
-        let init_age = InitAttributeModifier::new(Attribute::AGE, one);
-        let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, one);
-
         let property_layout = PropertyLayout::default();
-        let mut init_context = InitContext::new(&mut module, &property_layout);
-        assert!(InitPositionSphereModifier::default()
-            .apply(&mut init_context)
+        let particle_layout = ParticleLayout::default();
+        let mut init_context = InitContext::new(&property_layout, &particle_layout);
+        assert!(init_pos_sphere
+            .apply_init(&mut module, &mut init_context)
             .is_ok());
-        assert!(InitVelocitySphereModifier::default()
-            .apply(&mut init_context)
+        assert!(init_vel_sphere
+            .apply_init(&mut module, &mut init_context)
             .is_ok());
-        assert!(init_age.apply(&mut init_context).is_ok());
-        assert!(init_lifetime.apply(&mut init_context).is_ok());
+        assert!(init_age.apply_init(&mut module, &mut init_context).is_ok());
+        assert!(init_lifetime
+            .apply_init(&mut module, &mut init_context)
+            .is_ok());
         // assert_eq!(effect., init_context.init_code);
 
         let mut module = Module::default();
         let accel_mod = AccelModifier::constant(&mut module, Vec3::ONE);
         let drag_mod = LinearDragModifier::constant(&mut module, 3.5);
         let property_layout = PropertyLayout::default();
-        let mut update_context = UpdateContext::new(&mut module, &property_layout);
-        assert!(accel_mod.apply(&mut update_context).is_ok());
-        assert!(drag_mod.apply(&mut update_context).is_ok());
+        let particle_layout = ParticleLayout::default();
+        let mut update_context = UpdateContext::new(&property_layout, &particle_layout);
+        assert!(accel_mod
+            .apply_update(&mut module, &mut update_context)
+            .is_ok());
+        assert!(drag_mod
+            .apply_update(&mut module, &mut update_context)
+            .is_ok());
         assert!(ForceFieldModifier::default()
-            .apply(&mut update_context)
+            .apply_update(&mut module, &mut update_context)
             .is_ok());
         // assert_eq!(effect.update_layout, update_layout);
 
-        let mut render_context = RenderContext::default();
-        ParticleTextureModifier::default().apply(&mut render_context);
-        ColorOverLifetimeModifier::default().apply(&mut render_context);
-        SizeOverLifetimeModifier::default().apply(&mut render_context);
-        BillboardModifier::default().apply(&mut render_context);
+        let mut module = Module::default();
+        let property_layout = PropertyLayout::default();
+        let particle_layout = ParticleLayout::default();
+        let mut render_context = RenderContext::new(&property_layout, &particle_layout);
+        ParticleTextureModifier::default().apply_render(&mut module, &mut render_context);
+        ColorOverLifetimeModifier::default().apply_render(&mut module, &mut render_context);
+        SizeOverLifetimeModifier::default().apply_render(&mut module, &mut render_context);
+        OrientModifier::new(OrientMode::ParallelCameraDepthPlane)
+            .apply_render(&mut module, &mut render_context);
+        OrientModifier::new(OrientMode::FaceCameraPosition)
+            .apply_render(&mut module, &mut render_context);
+        OrientModifier::new(OrientMode::AlongVelocity)
+            .apply_render(&mut module, &mut render_context);
         // assert_eq!(effect.render_layout, render_layout);
     }
 

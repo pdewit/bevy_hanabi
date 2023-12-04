@@ -1,5 +1,11 @@
-//! A circle bobs up and down in the water,
-//! spawning square bubbles when in the water.
+//! A circle bobs up and down in the water, spawning square bubbles when in the
+//! water.
+//!
+//! This example demonstrates the use of [`Spawner::set_active()`] to enable or
+//! disable particle spawning, under the control of the application. This is
+//! similar to the `spawn_on_command.rs` example, where [`Spawner::reset()`] is
+//! used instead to spawn a single burst of particles.
+
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     log::LogPlugin,
@@ -11,7 +17,7 @@ use bevy::{
         RenderPlugin,
     },
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use bevy_hanabi::prelude::*;
 
@@ -27,13 +33,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DefaultPlugins
                 .set(LogPlugin {
                     level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,spawn=trace".to_string(),
+                    filter: "bevy_hanabi=warn,activate=trace".to_string(),
                 })
-                .set(RenderPlugin { wgpu_settings }),
+                .set(RenderPlugin {
+                    render_creation: wgpu_settings.into(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — activate".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
         )
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Update, (bevy::window::close_on_esc, update))
         .run();
@@ -103,21 +117,29 @@ fn setup(
 
     let writer = ExprWriter::new();
 
+    let age = writer.lit(0.).expr();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, age);
+
     let lifetime = writer.lit(5.).expr();
-    let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(0.05).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+
+    let init_vel = SetVelocitySphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        speed: writer.lit(0.1).expr(),
+    };
 
     let effect = effects.add(
         EffectAsset::new(32768, spawner, writer.finish())
             .with_name("activate")
-            .init(InitPositionSphereModifier {
-                center: Vec3::ZERO,
-                radius: 0.05,
-                dimension: ShapeDimension::Surface,
-            })
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: 0.1.into(),
-            })
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
             .init(init_lifetime)
             .render(SizeOverLifetimeModifier {
                 gradient: Gradient::constant(Vec2::splat(0.02)),

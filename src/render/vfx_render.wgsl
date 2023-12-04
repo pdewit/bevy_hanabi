@@ -1,27 +1,4 @@
-
-// FIXME - Use imports to get exact types from Bevy directly
-
-struct ColorGrading {
-    exposure: f32,
-    gamma: f32,
-    pre_saturation: f32,
-    post_saturation: f32,
-}
-
-struct View {
-    view_proj: mat4x4<f32>,
-    unjittered_view_proj: mat4x4<f32>,
-    inverse_view_proj: mat4x4<f32>,
-    view: mat4x4<f32>,
-    inverse_view: mat4x4<f32>,
-    projection: mat4x4<f32>,
-    inverse_projection: mat4x4<f32>,
-    world_position: vec3<f32>,
-    // viewport(x_origin, y_origin, width, height)
-    viewport: vec4<f32>,
-    color_grading: ColorGrading,
-    mip_bias: f32,
-}
+#import bevy_render::view::View
 
 struct Particle {
 {{ATTRIBUTES}}
@@ -30,6 +7,11 @@ struct Particle {
 struct ParticlesBuffer {
     particles: array<Particle>,
 }
+
+struct SimParams {
+    delta_time: f32,
+    time: f32,
+};
 
 struct IndirectBuffer {
     indices: array<u32>,
@@ -42,6 +24,25 @@ struct DispatchIndirect {
     pong: u32,
 }
 
+struct ForceFieldSource {
+    position: vec3<f32>,
+    max_radius: f32,
+    min_radius: f32,
+    mass: f32,
+    force_exponent: f32,
+    conform_to_sphere: f32,
+}
+
+struct Spawner {
+    transform: mat3x4<f32>, // transposed (row-major)
+    inverse_transform: mat3x4<f32>, // transposed (row-major)
+    spawn: i32,
+    seed: u32,
+    count: i32,
+    effect_index: u32,
+    force_field: array<ForceFieldSource, 16>,
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
@@ -51,9 +52,13 @@ struct VertexOutput {
 }
 
 @group(0) @binding(0) var<uniform> view: View;
+@group(0) @binding(1) var<uniform> sim_params : SimParams;
 @group(1) @binding(0) var<storage, read> particle_buffer : ParticlesBuffer;
 @group(1) @binding(1) var<storage, read> indirect_buffer : IndirectBuffer;
 @group(1) @binding(2) var<storage, read> dispatch_indirect : DispatchIndirect;
+#ifdef LOCAL_SPACE_SIMULATION
+@group(1) @binding(3) var<storage, read> spawner : Spawner; // NOTE - same group as update
+#endif
 #ifdef PARTICLE_TEXTURE
 @group(2) @binding(0) var particle_texture: texture_2d<f32>;
 @group(2) @binding(1) var particle_sampler: sampler;
@@ -79,13 +84,13 @@ fn to_float01(u: u32) -> f32 {
 }
 
 // Random floating-point number in [0:1]
-fn rand() -> f32 {
+fn frand() -> f32 {
     seed = pcg_hash(seed);
     return to_float01(pcg_hash(seed));
 }
 
 // Random floating-point number in [0:1]^2
-fn rand2() -> vec2<f32> {
+fn frand2() -> vec2<f32> {
     seed = pcg_hash(seed);
     var x = to_float01(seed);
     seed = pcg_hash(seed);
@@ -94,7 +99,7 @@ fn rand2() -> vec2<f32> {
 }
 
 // Random floating-point number in [0:1]^3
-fn rand3() -> vec3<f32> {
+fn frand3() -> vec3<f32> {
     seed = pcg_hash(seed);
     var x = to_float01(seed);
     seed = pcg_hash(seed);
@@ -105,7 +110,7 @@ fn rand3() -> vec3<f32> {
 }
 
 // Random floating-point number in [0:1]^4
-fn rand4() -> vec4<f32> {
+fn frand4() -> vec4<f32> {
     // Each rand() produces 32 bits, and we need 24 bits per component,
     // so can get away with only 3 calls.
     var r0 = pcg_hash(seed);
@@ -123,7 +128,39 @@ fn rand4() -> vec4<f32> {
 }
 
 fn rand_uniform(a: f32, b: f32) -> f32 {
-    return a + rand() * (b - a);
+    return a + frand() * (b - a);
+}
+
+fn get_camera_position_effect_space() -> vec3<f32> {
+    let view_pos = view.view[3].xyz;
+#ifdef LOCAL_SPACE_SIMULATION
+    let inverse_transform = transpose(
+        mat3x3(
+            spawner.inverse_transform[0].xyz,
+            spawner.inverse_transform[1].xyz,
+            spawner.inverse_transform[2].xyz,
+        )
+    );
+    return inverse_transform * view_pos;
+#else
+    return view_pos;
+#endif
+}
+
+fn get_camera_rotation_effect_space() -> mat3x3<f32> {
+    let view_rot = mat3x3(view.view[0].xyz, view.view[1].xyz, view.view[2].xyz);
+#ifdef LOCAL_SPACE_SIMULATION
+    let inverse_transform = transpose(
+        mat3x3(
+            spawner.inverse_transform[0].xyz,
+            spawner.inverse_transform[1].xyz,
+            spawner.inverse_transform[2].xyz,
+        )
+    );
+    return inverse_transform * view_rot;
+#else
+    return view_rot;
+#endif
 }
 
 {{RENDER_EXTRA}}
@@ -143,23 +180,43 @@ fn vertex(
     var particle = particle_buffer.particles[index];
     var out: VertexOutput;
 #ifdef PARTICLE_TEXTURE
-    out.uv = vertex_uv;
+    var uv = vertex_uv;
+#ifdef FLIPBOOK
+    let row_count = {{FLIPBOOK_ROW_COUNT}};
+    let ij = vec2<f32>(f32(particle.sprite_index % row_count), f32(particle.sprite_index / row_count));
+    uv = (ij + uv) * {{FLIPBOOK_SCALE}};
+#endif
+    out.uv = uv;
 #endif
 
 {{INPUTS}}
 
 {{VERTEX_MODIFIERS}}
 
+#ifdef LOCAL_SPACE_SIMULATION
+    let transform = transpose(
+        mat4x4(
+            spawner.transform[0],
+            spawner.transform[1],
+            spawner.transform[2],
+            vec4<f32>(0.0, 0.0, 0.0, 1.0)
+        )
+    );
+#endif
+
 #ifdef PARTICLE_SCREEN_SPACE_SIZE
     let half_screen = view.viewport.zw / 2.;
     let vpos = vertex_position * vec3<f32>(size.x / half_screen.x, size.y / half_screen.y, 1.0);
-    out.position = view.view_proj * vec4<f32>(particle.position, 1.0) + vec4<f32>(vpos, 0.0);
+    let local_position = particle.position;
+    let world_position = {{SIMULATION_SPACE_TRANSFORM_PARTICLE}};
+    out.position = view.view_proj * world_position + vec4<f32>(vpos, 0.0);
 #else
     let vpos = vertex_position * vec3<f32>(size.x, size.y, 1.0);
-    let world_position = particle.position
+    let local_position = particle.position
         + axis_x * vpos.x
         + axis_y * vpos.y;
-    out.position = view.view_proj * vec4<f32>(world_position, 1.0);
+    let world_position = {{SIMULATION_SPACE_TRANSFORM_PARTICLE}};
+    out.position = view.view_proj * world_position;
 #endif
 
     out.color = color;
@@ -170,14 +227,26 @@ fn vertex(
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
+#ifdef USE_ALPHA_MASK
+    var alpha_cutoff: f32 = {{ALPHA_CUTOFF}};
+#endif
+
 {{FRAGMENT_MODIFIERS}}
 
-#ifdef PARTICLE_TEXTURE
-    var color = textureSample(particle_texture, particle_sampler, in.uv);
-    color = vec4<f32>(1.0, 1.0, 1.0, color.r); // FIXME - grayscale modulate
-    color = in.color * color;
-#else
     var color = in.color;
+
+#ifdef PARTICLE_TEXTURE
+    var texColor = textureSample(particle_texture, particle_sampler, in.uv);
+    {{PARTICLE_TEXTURE_SAMPLE_MAPPING}}
 #endif
+
+#ifdef USE_ALPHA_MASK
+    if color.a >= alpha_cutoff {
+        color.a = 1.0;
+    } else {
+        discard;
+    }
+#endif
+
     return color;
 }

@@ -8,7 +8,7 @@ use bevy::{
         RenderPlugin,
     },
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use bevy_hanabi::prelude::*;
 
@@ -38,11 +38,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     level: bevy::log::Level::WARN,
                     filter: "bevy_hanabi=warn,spawn=trace".to_string(),
                 })
-                .set(RenderPlugin { wgpu_settings }),
+                .set(RenderPlugin {
+                    render_creation: wgpu_settings.into(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — spawn".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
         )
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Update, (bevy::window::close_on_esc, update_accel))
         .run();
@@ -97,28 +105,36 @@ fn setup(
 
     let writer1 = ExprWriter::new();
 
+    let age1 = writer1.lit(0.).expr();
+    let init_age1 = SetAttributeModifier::new(Attribute::AGE, age1);
+
     let lifetime1 = writer1.lit(5.).expr();
-    let init_lifetime1 = InitAttributeModifier::new(Attribute::LIFETIME, lifetime1);
+    let init_lifetime1 = SetAttributeModifier::new(Attribute::LIFETIME, lifetime1);
 
     // Add constant downward acceleration to simulate gravity
     let accel1 = writer1.lit(Vec3::Y * -3.).expr();
     let update_accel1 = AccelModifier::new(accel1);
 
+    let init_pos1 = SetPositionCone3dModifier {
+        base_radius: writer1.lit(0.).expr(),
+        top_radius: writer1.lit(10.).expr(),
+        height: writer1.lit(20.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let init_vel1 = SetVelocitySphereModifier {
+        center: writer1.lit(Vec3::ZERO).expr(),
+        speed: writer1.lit(10.).expr(),
+    };
+
     let effect1 = effects.add(
         EffectAsset::new(32768, Spawner::rate(500.0.into()), writer1.finish())
             .with_name("emit:rate")
             .with_property("my_accel", Vec3::new(0., -3., 0.).into())
-            .init(InitPositionCone3dModifier {
-                base_radius: 0.,
-                top_radius: 10.,
-                height: 20.,
-                dimension: ShapeDimension::Volume,
-            })
+            .init(init_pos1)
             // Make spawned particles move away from the emitter origin
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: 10.0.into(),
-            })
+            .init(init_vel1)
+            .init(init_age1)
             .init(init_lifetime1)
             .update(update_accel1)
             .render(ColorOverLifetimeModifier {
@@ -139,6 +155,10 @@ fn setup(
                     .with_rotation(Quat::from_rotation_z(1.)),
                 ..Default::default()
             },
+            // Note: We don't need to manually insert an EffectProperties here, because Hanabi will
+            // take care of it on next update (since the effect has a property). Since we don't
+            // really use that property here, we don't access the EffectProperties so don't care
+            // when it's spawned. See also effect3 below for a different approach.
         ))
         .with_children(|p| {
             // Reference cube to visualize the emit origin
@@ -157,20 +177,25 @@ fn setup(
     gradient2.add_key(1.0, Vec4::splat(0.0));
 
     let writer2 = ExprWriter::new();
+    let age2 = writer2.lit(0.).expr();
+    let init_age2 = SetAttributeModifier::new(Attribute::AGE, age2);
     let lifetime2 = writer2.lit(5.).expr();
-    let init_lifetime2 = InitAttributeModifier::new(Attribute::LIFETIME, lifetime2);
+    let init_lifetime2 = SetAttributeModifier::new(Attribute::LIFETIME, lifetime2);
+    let init_pos2 = SetPositionSphereModifier {
+        center: writer2.lit(Vec3::ZERO).expr(),
+        radius: writer2.lit(5.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+    let init_vel2 = SetVelocitySphereModifier {
+        center: writer2.lit(Vec3::ZERO).expr(),
+        speed: writer2.lit(2.).expr(),
+    };
     let effect2 = effects.add(
         EffectAsset::new(32768, Spawner::once(1000.0.into(), true), writer2.finish())
             .with_name("emit:once")
-            .init(InitPositionSphereModifier {
-                center: Vec3::ZERO,
-                radius: 5.,
-                dimension: ShapeDimension::Volume,
-            })
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: 2.0.into(),
-            })
+            .init(init_pos2)
+            .init(init_vel2)
+            .init(init_age2)
             .init(init_lifetime2)
             .render(ColorOverLifetimeModifier {
                 gradient: gradient2,
@@ -206,12 +231,31 @@ fn setup(
 
     let writer3 = ExprWriter::new();
 
+    let age3 = writer3.lit(0.).expr();
+    let init_age3 = SetAttributeModifier::new(Attribute::AGE, age3);
+
     let lifetime3 = writer3.lit(5.).expr();
-    let init_lifetime3 = InitAttributeModifier::new(Attribute::LIFETIME, lifetime3);
+    let init_lifetime3 = SetAttributeModifier::new(Attribute::LIFETIME, lifetime3);
+
+    // Initialize size with a random value between 0.3 and 0.7: size = frand() * 0.4
+    // + 0.3
+    let size3 = (writer3.rand(ScalarType::Float) * writer3.lit(0.4) + writer3.lit(0.3)).expr();
+    let init_size3 = SetAttributeModifier::new(Attribute::SIZE, size3);
 
     // Add property-driven acceleration
     let accel3 = writer3.prop("my_accel").expr();
     let update_accel3 = AccelModifier::new(accel3);
+
+    let init_pos3 = SetPositionSphereModifier {
+        center: writer3.lit(Vec3::ZERO).expr(),
+        radius: writer3.lit(5.).expr(),
+        dimension: ShapeDimension::Volume,
+    };
+
+    let init_vel3 = SetVelocitySphereModifier {
+        center: writer3.lit(Vec3::ZERO).expr(),
+        speed: writer3.lit(2.).expr(),
+    };
 
     let effect3 = effects.add(
         EffectAsset::new(
@@ -221,20 +265,11 @@ fn setup(
         )
         .with_name("emit:burst")
         .with_property("my_accel", Vec3::new(0., -3., 0.).into())
-        .init(InitPositionSphereModifier {
-            center: Vec3::ZERO,
-            radius: 5.,
-            dimension: ShapeDimension::Volume,
-        })
-        .init(InitVelocitySphereModifier {
-            center: Vec3::ZERO,
-            speed: 2.0.into(),
-        })
+        .init(init_pos3)
+        .init(init_vel3)
+        .init(init_age3)
         .init(init_lifetime3)
-        .init(InitSizeModifier {
-            // At spawn time, assign each particle a random size between 0.3 and 0.7
-            size: Value::<f32>::Uniform((0.3, 0.7)).into(),
-        })
+        .init(init_size3)
         .update(update_accel3)
         .render(ColorOverLifetimeModifier {
             gradient: gradient3,
@@ -249,6 +284,12 @@ fn setup(
                 transform: Transform::from_translation(Vec3::new(30., 0., 0.)),
                 ..Default::default()
             },
+            // Note: We manually insert EffectProperties so update_accel() can immediately set a
+            // new value to the property, without having to deal with one-frame delays. If we let
+            // Hanabi create the component, it will do so *before* Update, so on the first frame
+            // after spawning it, update_accel() will not find it (it's spawned on next frame) and
+            // will panic. See also effect1 above.
+            EffectProperties::default(),
             DynamicRuntimeAccel,
         ))
         .with_children(|p| {
@@ -266,11 +307,11 @@ fn setup(
 
 fn update_accel(
     time: Res<Time>,
-    mut query: Query<&mut CompiledParticleEffect, With<DynamicRuntimeAccel>>,
+    mut query: Query<&mut EffectProperties, With<DynamicRuntimeAccel>>,
 ) {
-    let mut effect = query.single_mut();
+    let mut properties = query.single_mut();
     let accel0 = 10.;
     let (s, c) = (time.elapsed_seconds() * 0.3).sin_cos();
     let accel = Vec3::new(c * accel0, s * accel0, 0.);
-    effect.set_property("my_accel", accel.into());
+    properties.set("my_accel", accel.into());
 }

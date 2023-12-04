@@ -35,8 +35,8 @@ pub enum ScalarType {
 impl ScalarType {
     /// Check if this type is a numeric type.
     ///
-    /// A numeric type can be used in various math operators etc. All types are
-    /// numeric, except `ScalarType::Bool`.
+    /// A numeric type can be used in various math operators etc. All scalar
+    /// types are numeric, except `ScalarType::Bool`.
     pub fn is_numeric(&self) -> bool {
         !(matches!(self, ScalarType::Bool))
     }
@@ -53,7 +53,8 @@ impl ScalarType {
     /// Alignment of a value of this type, in bytes.
     ///
     /// This corresponds to the alignment of a variable of that type when part
-    /// of a struct in WGSL.
+    /// of a struct in WGSL. For `bool`, this is always 4 bytes (undefined in
+    /// WGSL spec).
     pub const fn align(&self) -> usize {
         4
     }
@@ -72,6 +73,10 @@ impl ToWgslString for ScalarType {
 }
 
 /// Vector type (`vecN<T>`).
+///
+/// Describes the type of a vector, which is composed of 2 to 4 components of a
+/// same scalar type. This type corresponds to one of the valid vector types in
+/// the WGSL specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
 pub struct VectorType {
     /// Type of all elements (components) of the vector.
@@ -127,6 +132,10 @@ impl VectorType {
     }
 
     /// Is the type a numeric type?
+    ///
+    /// See [`ScalarType::is_numeric()`] for a definition of a numeric type.
+    ///
+    /// [`ScalarType::is_numeric()`]: crate::ScalarType::is_numeric
     pub fn is_numeric(&self) -> bool {
         self.elem_type.is_numeric()
     }
@@ -245,7 +254,7 @@ impl ToWgslString for MatrixType {
 }
 
 /// Type of an [`Attribute`]'s value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ValueType {
     /// A scalar type (single value).
@@ -300,6 +309,24 @@ impl ValueType {
             ValueType::Vector(v) => v.align(),
             ValueType::Matrix(m) => m.align(),
         }
+    }
+}
+
+impl From<ScalarType> for ValueType {
+    fn from(value: ScalarType) -> Self {
+        ValueType::Scalar(value)
+    }
+}
+
+impl From<VectorType> for ValueType {
+    fn from(value: VectorType) -> Self {
+        ValueType::Vector(value)
+    }
+}
+
+impl From<MatrixType> for ValueType {
+    fn from(value: MatrixType) -> Self {
+        ValueType::Matrix(value)
     }
 }
 
@@ -392,6 +419,31 @@ impl AttributeInner {
         Value::Vector(VectorValue::new_vec3(Vec3::Z)),
     );
 
+    pub const SPRITE_INDEX: &'static AttributeInner = &AttributeInner::new(
+        Cow::Borrowed("sprite_index"),
+        Value::Scalar(ScalarValue::Int(0)),
+    );
+
+    pub const F32_0: &'static AttributeInner = &AttributeInner::new(
+        Cow::Borrowed("f32_0"),
+        Value::Scalar(ScalarValue::Float(0.)),
+    );
+
+    pub const F32_1: &'static AttributeInner = &AttributeInner::new(
+        Cow::Borrowed("f32_1"),
+        Value::Scalar(ScalarValue::Float(0.)),
+    );
+
+    pub const F32_2: &'static AttributeInner = &AttributeInner::new(
+        Cow::Borrowed("f32_2"),
+        Value::Scalar(ScalarValue::Float(0.)),
+    );
+
+    pub const F32_3: &'static AttributeInner = &AttributeInner::new(
+        Cow::Borrowed("f32_3"),
+        Value::Scalar(ScalarValue::Float(0.)),
+    );
+
     #[inline]
     pub(crate) const fn new(name: Cow<'static, str>, default_value: Value) -> Self {
         Self {
@@ -406,8 +458,15 @@ impl AttributeInner {
 /// Effects are composed of many simulated particles. Each particle is in turn
 /// composed of a set of attributes, which are used to simulate and render it.
 /// Common attributes include the particle's position, its age, or its color.
-/// See [`Attribute::ALL`] for a list of supported attributes. Custom attributes
-/// are not supported.
+/// See [`Attribute::all()`] for a list of supported attributes. Custom
+/// attributes are not supported.
+///
+/// Attributes are indirectly added to an effect by adding [modifiers] requiring
+/// them. Each modifier documents its required attributes. You can force a
+/// single attribute by adding the [`SetAttributeModifier`].
+///
+/// [modifiers]: crate::modifier
+/// [`SetAttributeModifier`]: crate::modifier::SetAttributeModifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "&str", into = "&'static str")]
 pub struct Attribute(pub(crate) &'static AttributeInner);
@@ -458,7 +517,7 @@ impl Typed for Attribute {
                 NamedField::new::<Cow<str>>("name"),
                 NamedField::new::<Value>("default_value"),
             ];
-            let info = StructInfo::new::<Self>("Attribute", &fields);
+            let info = StructInfo::new::<Self>(&fields);
             TypeInfo::Struct(info)
         })
     }
@@ -603,6 +662,10 @@ impl FromReflect for Attribute {
 impl Attribute {
     /// The particle position in [simulation space].
     ///
+    /// # Name
+    ///
+    /// `position`
+    ///
     /// # Type
     ///
     /// [`VectorType::VEC3F`] representing the XYZ coordinates of the position.
@@ -611,6 +674,10 @@ impl Attribute {
     pub const POSITION: Attribute = Attribute(AttributeInner::POSITION);
 
     /// The particle velocity in [simulation space].
+    ///
+    /// # Name
+    ///
+    /// `velocity`
     ///
     /// # Type
     ///
@@ -621,7 +688,7 @@ impl Attribute {
 
     /// The age of the particle.
     ///
-    /// Each time the particle is updated, the current simualtion delta time is
+    /// Each time the particle is updated, the current simulation delta time is
     /// added to the particle's age. The age can be used to animate some other
     /// quantities; see the [`ColorOverLifetimeModifier`] for example.
     ///
@@ -631,11 +698,15 @@ impl Attribute {
     /// exceeds its lifetime, the particle dies and is not simulated nor
     /// rendered anymore.
     ///
+    /// # Name
+    ///
+    /// `age`
+    ///
     /// # Type
     ///
     /// [`ScalarType::Float`]
     ///
-    /// [`ColorOverLifetimeModifier`]: crate::modifier::render::ColorOverLifetimeModifier
+    /// [`ColorOverLifetimeModifier`]: crate::modifier::output::ColorOverLifetimeModifier
     pub const AGE: Attribute = Attribute(AttributeInner::AGE);
 
     /// The lifetime of the particle.
@@ -644,6 +715,10 @@ impl Attribute {
     /// particle's age allows determining if the particle needs to be
     /// simulated and rendered. This requires the [`Attribute::AGE`]
     /// attribute to be used too.
+    ///
+    /// # Name
+    ///
+    /// `lifetime`
     ///
     /// # Type
     ///
@@ -655,6 +730,10 @@ impl Attribute {
     /// This attribute stores a per-particle color, which can be used for
     /// various purposes, generally as the base color for rendering the
     /// particle.
+    ///
+    /// # Name
+    ///
+    /// `color`
     ///
     /// # Type
     ///
@@ -668,6 +747,10 @@ impl Attribute {
     /// various purposes, generally as the base color for rendering the
     /// particle.
     ///
+    /// # Name
+    ///
+    /// `hdr_color`
+    ///
     /// # Type
     ///
     /// [`VectorType::VEC4F`] representing the RGBA components of the color.
@@ -675,14 +758,27 @@ impl Attribute {
     /// represent HDR values.
     pub const HDR_COLOR: Attribute = Attribute(AttributeInner::HDR_COLOR);
 
-    /// The particle's transparency (alpha).
+    /// The particle's opacity (alpha).
     ///
-    /// Type: [`ScalarType::Float`]
+    /// This is a value in \[0:1\], where `0` corresponds to a fully transparent
+    /// particle, and `1` to a fully opaque one.
+    ///
+    /// # Name
+    ///
+    /// `alpha`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Float`]
     pub const ALPHA: Attribute = Attribute(AttributeInner::ALPHA);
 
     /// The particle's uniform size.
     ///
     /// The particle is uniformly scaled by this size.
+    ///
+    /// # Name
+    ///
+    /// `size`
     ///
     /// # Type
     ///
@@ -694,6 +790,10 @@ impl Attribute {
     /// The particle, when drawn as a quad, is scaled along its local X and Y
     /// axes by these values.
     ///
+    /// # Name
+    ///
+    /// `size2`
+    ///
     /// # Type
     ///
     /// [`VectorType::VEC2F`] representing the XY sizes of the particle.
@@ -704,11 +804,18 @@ impl Attribute {
     /// This attribute stores a per-particle X axis, which defines the
     /// horizontal direction of a quad particle. This is generally used to
     /// re-orient the particle during rendering, for example to face the camera
-    /// or another point of interest.
+    /// or another point of interest. For example, the [`OrientModifier`]
+    /// modifies this attribute to make the particle face a specific item.
+    ///
+    /// # Name
+    ///
+    /// `axis_x`
     ///
     /// # Type
     ///
     /// [`VectorType::VEC3F`]
+    ///
+    /// [`OrientModifier`]: crate::modifier::output::OrientModifier
     pub const AXIS_X: Attribute = Attribute(AttributeInner::AXIS_X);
 
     /// The local Y axis of the particle.
@@ -716,11 +823,18 @@ impl Attribute {
     /// This attribute stores a per-particle Y axis, which defines the vertical
     /// direction of a quad particle. This is generally used to re-orient the
     /// particle during rendering, for example to face the camera or another
-    /// point of interest.
+    /// point of interest. For example, the [`OrientModifier`] modifies this
+    /// attribute to make the particle face a specific item.
+    ///
+    /// # Name
+    ///
+    /// `axis_y`
     ///
     /// # Type
     ///
     /// [`VectorType::VEC3F`]
+    ///
+    /// [`OrientModifier`]: crate::modifier::output::OrientModifier
     pub const AXIS_Y: Attribute = Attribute(AttributeInner::AXIS_Y);
 
     /// The local Z axis of the particle.
@@ -728,15 +842,98 @@ impl Attribute {
     /// This attribute stores a per-particle Z axis, which defines the normal to
     /// a quad particle's plane. This is generally used to re-orient the
     /// particle during rendering, for example to face the camera or another
-    /// point of interest.
+    /// point of interest. For example, the [`OrientModifier`] modifies this
+    /// attribute to make the particle face a specific item.
+    ///
+    /// # Name
+    ///
+    /// `axis_z`
     ///
     /// # Type
     ///
     /// [`VectorType::VEC3F`]
+    ///
+    /// [`OrientModifier`]: crate::modifier::output::OrientModifier
     pub const AXIS_Z: Attribute = Attribute(AttributeInner::AXIS_Z);
 
+    /// The sprite index in a flipbook animation.
+    ///
+    /// This attribute stores the index of the sprite of a flipbook animation.
+    /// This is used with the [`FlipbookModifier`].
+    ///
+    /// # Name
+    ///
+    /// `sprite_index`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Int`]
+    ///
+    /// [`FlipbookModifier`]: crate::modifier::output::FlipbookModifier
+    pub const SPRITE_INDEX: Attribute = Attribute(AttributeInner::SPRITE_INDEX);
+
+    /// A generic scalar float attribute.
+    ///
+    /// This attribute can be used for anything. It has no specific meaning. You
+    /// can store whatever per-particle value you want in it (for example, at
+    /// spawn time) and read it back later.
+    ///
+    /// # Name
+    ///
+    /// `f32_0`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Float`]
+    pub const F32_0: Attribute = Attribute(AttributeInner::F32_0);
+
+    /// A generic scalar float attribute.
+    ///
+    /// This attribute can be used for anything. It has no specific meaning. You
+    /// can store whatever per-particle value you want in it (for example, at
+    /// spawn time) and read it back later.
+    ///
+    /// # Name
+    ///
+    /// `f32_1`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Float`]
+    pub const F32_1: Attribute = Attribute(AttributeInner::F32_1);
+
+    /// A generic scalar float attribute.
+    ///
+    /// This attribute can be used for anything. It has no specific meaning. You
+    /// can store whatever per-particle value you want in it (for example, at
+    /// spawn time) and read it back later.
+    ///
+    /// # Name
+    ///
+    /// `f32_2`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Float`]
+    pub const F32_2: Attribute = Attribute(AttributeInner::F32_2);
+
+    /// A generic scalar float attribute.
+    ///
+    /// This attribute can be used for anything. It has no specific meaning. You
+    /// can store whatever per-particle value you want in it (for example, at
+    /// spawn time) and read it back later.
+    ///
+    /// # Name
+    ///
+    /// `f32_3`
+    ///
+    /// # Type
+    ///
+    /// [`ScalarType::Float`]
+    pub const F32_3: Attribute = Attribute(AttributeInner::F32_3);
+
     /// Collection of all the existing particle attributes.
-    pub const ALL: [Attribute; 12] = [
+    const ALL: [Attribute; 17] = [
         Attribute::POSITION,
         Attribute::VELOCITY,
         Attribute::AGE,
@@ -749,11 +946,16 @@ impl Attribute {
         Attribute::AXIS_X,
         Attribute::AXIS_Y,
         Attribute::AXIS_Z,
+        Attribute::SPRITE_INDEX,
+        Attribute::F32_0,
+        Attribute::F32_1,
+        Attribute::F32_2,
+        Attribute::F32_3,
     ];
 
     /// Retrieve an attribute by its name.
     ///
-    /// See [`Attribute::ALL`] for the list of attributes, and the
+    /// See [`Attribute::all()`] for the list of attributes, and the
     /// [`Attribute::name()`] method of each attribute for their name.
     ///
     /// # Example
@@ -768,6 +970,20 @@ impl Attribute {
             .iter()
             .find(|&attr| attr.name() == name)
             .copied()
+    }
+
+    /// Get the list of all existing attributes.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use bevy_hanabi::*;
+    /// for attr in Attribute::all() {
+    ///     println!("{}", attr.name());
+    /// }
+    /// ```
+    pub fn all() -> &'static [Attribute] {
+        &Self::ALL
     }
 
     /// The attribute's name.
@@ -1004,6 +1220,21 @@ impl From<&ParticleLayout> for ParticleLayoutBuilder {
 /// together in a single call, therefore it is recommended to minimize the
 /// layout variations across effects and attempt to reuse the same layout for
 /// multiple effects, which can be benefical for performance.
+///
+/// # Construction
+///
+/// To create a particle layout you can either:
+/// - Use [`ParticleLayout::default()`] to create the default layout, which
+///   contains some default attributes commonly used for effects
+///   ([`Attribute::POSITION`], [`Attribute::VELOCITY`], [`Attribute::AGE`],
+///   [`Attribute::LIFETIME`]).
+/// - Use [`ParticleLayout::empty()`] to create an empty layout without any
+///   attribute.
+/// - Use [`ParticleLayout::new()`] to create a [`ParticleLayoutBuilder`] and
+///   append the necessary attributes manually then call [`build()`] to complete
+///   the layout.
+///
+/// [`build()`]: crate::ParticleLayoutBuilder::build
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ParticleLayout {
     layout: Vec<AttributeLayout>,
@@ -1034,7 +1265,7 @@ impl ParticleLayout {
     /// The layout is immutable. This is mostly used as a placeholder while a
     /// valid layout is not available yet. To create a new non-finalized layout
     /// which can be mutated, use [`ParticleLayout::new()`] instead.
-    pub fn empty() -> ParticleLayout {
+    pub const fn empty() -> ParticleLayout {
         Self { layout: vec![] }
     }
 
@@ -1241,18 +1472,11 @@ mod tests {
                 .iter()
                 .find(|c| c.1.name == Some("x".to_string()))
                 .unwrap();
-            let (size, align) = if let naga::ConstantInner::Scalar { width, value: _ } = &cst.inner
-            {
-                // Scalar types have the same size and align
-                (
-                    *width as u32,
-                    naga::proc::Alignment::new(*width as u32).unwrap(),
-                )
-            } else {
-                // For non-scalar types, calculate the type layout according to WGSL
-                let type_handle = cst.inner.resolve_type().handle().unwrap();
+            let (size, align) = {
+                // Calculate the type layout according to WGSL
+                let type_handle = cst.ty;
                 let mut layouter = Layouter::default();
-                assert!(layouter.update(&m.types, &m.constants).is_ok());
+                assert!(layouter.update(m.to_ctx()).is_ok());
                 let layout = layouter[type_handle];
                 (layout.size, layout.alignment)
             };
@@ -1293,8 +1517,8 @@ mod tests {
 
     #[test]
     fn attr_from_name() {
-        for attr in Attribute::ALL {
-            assert_eq!(Attribute::from_name(attr.name()), Some(attr));
+        for attr in Attribute::all() {
+            assert_eq!(Attribute::from_name(attr.name()), Some(*attr));
         }
     }
 
@@ -1303,10 +1527,7 @@ mod tests {
         let mut attr = Attribute(TEST_ATTR_INNER);
 
         let r = attr.as_reflect();
-        assert_eq!(
-            TypeRegistration::of::<Attribute>().type_name(),
-            r.type_name()
-        );
+        assert_eq!(TypeRegistration::of::<Attribute>().type_id(), r.type_id());
         match r.reflect_ref() {
             ReflectRef::Struct(s) => {
                 assert_eq!(2, s.field_len());
@@ -1318,26 +1539,29 @@ mod tests {
 
                 assert_eq!(
                     Some("alloc::borrow::Cow<str>"),
-                    s.field("name").map(|f| f.type_name())
+                    s.field("name")
+                        .map(|f| f.get_represented_type_info().unwrap().type_path())
                 );
                 assert_eq!(
                     Some("bevy_hanabi::graph::Value"),
-                    s.field("default_value").map(|f| f.type_name())
+                    s.field("default_value")
+                        .map(|f| f.get_represented_type_info().unwrap().type_path())
                 );
                 assert!(s.field("DUMMY").is_none());
                 assert!(s.field("").is_none());
 
                 for f in s.iter_fields() {
+                    let tp = f.get_represented_type_info().unwrap().type_path();
                     assert!(
-                        f.type_name().contains("alloc::borrow::Cow<str>")
-                            || f.type_name().contains("bevy_hanabi::graph::Value")
+                        tp.contains("alloc::borrow::Cow<str>")
+                            || tp.contains("bevy_hanabi::graph::Value")
                     );
                 }
 
                 let d = s.clone_dynamic();
                 assert_eq!(
-                    TypeRegistration::of::<Attribute>().type_name(),
-                    d.get_represented_type_info().unwrap().type_name()
+                    TypeRegistration::of::<Attribute>().type_id(),
+                    d.get_represented_type_info().unwrap().type_id()
                 );
                 assert_eq!(Some(0), d.index_of("name"));
                 assert_eq!(Some(1), d.index_of("default_value"));

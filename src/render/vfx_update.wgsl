@@ -22,6 +22,7 @@ struct ForceFieldSource {
 
 struct Spawner {
     transform: mat3x4<f32>, // transposed (row-major)
+    inverse_transform: mat3x4<f32>, // transposed (row-major)
     spawn: atomic<i32>,
     seed: u32,
     count_unused: u32,
@@ -73,13 +74,13 @@ fn to_float01(u: u32) -> f32 {
 }
 
 // Random floating-point number in [0:1]
-fn rand() -> f32 {
+fn frand() -> f32 {
     seed = pcg_hash(seed);
     return to_float01(pcg_hash(seed));
 }
 
 // Random floating-point number in [0:1]^2
-fn rand2() -> vec2<f32> {
+fn frand2() -> vec2<f32> {
     seed = pcg_hash(seed);
     var x = to_float01(seed);
     seed = pcg_hash(seed);
@@ -88,7 +89,7 @@ fn rand2() -> vec2<f32> {
 }
 
 // Random floating-point number in [0:1]^3
-fn rand3() -> vec3<f32> {
+fn frand3() -> vec3<f32> {
     seed = pcg_hash(seed);
     var x = to_float01(seed);
     seed = pcg_hash(seed);
@@ -99,7 +100,7 @@ fn rand3() -> vec3<f32> {
 }
 
 // Random floating-point number in [0:1]^4
-fn rand4() -> vec4<f32> {
+fn frand4() -> vec4<f32> {
     // Each rand() produces 32 bits, and we need 24 bits per component,
     // so can get away with only 3 calls.
     var r0 = pcg_hash(seed);
@@ -117,7 +118,7 @@ fn rand4() -> vec4<f32> {
 }
 
 fn rand_uniform(a: f32, b: f32) -> f32 {
-    return a + rand() * (b - a);
+    return a + frand() * (b - a);
 }
 
 fn proj(u: vec3<f32>, v: vec3<f32>) -> vec3<f32> {

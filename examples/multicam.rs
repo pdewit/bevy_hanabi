@@ -10,19 +10,28 @@ use bevy::{
     },
     window::WindowResized,
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use bevy_hanabi::prelude::*;
 
 fn main() {
     App::default()
-        .add_plugins(DefaultPlugins.set(LogPlugin {
-            level: bevy::log::Level::WARN,
-            filter: "bevy_hanabi=warn,multicam=trace".to_string(),
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(LogPlugin {
+                    level: bevy::log::Level::WARN,
+                    filter: "bevy_hanabi=warn,multicam=trace".to_string(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — multicam".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -51,23 +60,31 @@ fn make_effect(color: Color) -> EffectAsset {
 
     let writer = ExprWriter::new();
 
+    let age = writer.lit(0.).expr();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, age);
+
     let lifetime = writer.lit(5.).expr();
-    let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let accel = writer.lit(Vec3::Y * -3.).expr();
     let update_accel = AccelModifier::new(accel);
 
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(2.).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+
+    let init_vel = SetVelocitySphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        speed: writer.lit(6.).expr(),
+    };
+
     EffectAsset::new(32768, Spawner::rate(5.0.into()), writer.finish())
-        .with_name("effect1")
-        .init(InitPositionSphereModifier {
-            center: Vec3::ZERO,
-            radius: 2.,
-            dimension: ShapeDimension::Surface,
-        })
-        .init(InitVelocitySphereModifier {
-            center: Vec3::ZERO,
-            speed: 6.0.into(),
-        })
+        .with_name("effect")
+        .init(init_pos)
+        .init(init_vel)
+        .init(init_age)
         .init(init_lifetime)
         .update(update_accel)
         .render(ColorOverLifetimeModifier {
@@ -77,7 +94,7 @@ fn make_effect(color: Color) -> EffectAsset {
             gradient: size_gradient.clone(),
             screen_space_size: false,
         })
-        .render(BillboardModifier)
+        .render(OrientModifier::new(OrientMode::FaceCameraPosition))
 }
 
 fn setup(
@@ -245,8 +262,10 @@ fn update_camera_viewports(
     // changes so then each camera always takes up half the screen.
     // A resize_event is sent when the window is first created, allowing us to reuse
     // this system for initial setup.
-    for resize_event in resize_events.iter() {
-        let Ok(window) = window.get(resize_event.window) else {continue;};
+    for resize_event in resize_events.read() {
+        let Ok(window) = window.get(resize_event.window) else {
+            continue;
+        };
         let dw = window.physical_width() / 2;
         let dh = window.physical_height() / 2;
         let physical_size = UVec2::new(dw, dh);

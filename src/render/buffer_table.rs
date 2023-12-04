@@ -376,7 +376,7 @@ impl<T: Pod + ShaderSize> BufferTable<T> {
                 usage: self.buffer_usage,
                 mapped_at_creation: false,
             });
-            if let Some(mut ab) = self.buffer.as_mut() {
+            if let Some(ab) = self.buffer.as_mut() {
                 // If there's any data currently in the GPU buffer, we need to copy it on next
                 // update to preserve it, but only if there's no pending copy already.
                 if self.active_size > 0 && ab.old_buffer.is_none() {
@@ -502,7 +502,9 @@ impl<T: Pod + ShaderSize> BufferTable<T> {
         );
 
         // If there's no more GPU buffer, there's nothing to do
-        let Some(ab) = self.buffer.as_ref() else { return; };
+        let Some(ab) = self.buffer.as_ref() else {
+            return;
+        };
 
         // Copy any old buffer into the new one, and clear the old buffer. Note that we
         // only clear the ref-counted reference to the buffer, not the actual buffer,

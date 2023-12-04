@@ -1,4 +1,6 @@
-use bevy::{ecs::system::Resource, prelude::*, reflect::Reflect};
+use std::hash::{Hash, Hasher};
+
+use bevy::{ecs::system::Resource, prelude::*, reflect::Reflect, utils::FloatOrd};
 use rand::{
     distributions::{uniform::SampleUniform, Distribution, Uniform},
     SeedableRng,
@@ -6,7 +8,7 @@ use rand::{
 use rand_pcg::Pcg32;
 use serde::{Deserialize, Serialize};
 
-use crate::{EffectAsset, ParticleEffect, SimulationCondition, ToWgslString};
+use crate::{EffectAsset, ParticleEffect, SimulationCondition};
 
 /// An RNG to be used in the CPU for the particle system engine
 pub(crate) fn new_rng() -> Pcg32 {
@@ -20,13 +22,56 @@ pub(crate) fn new_rng() -> Pcg32 {
 #[derive(Resource)]
 pub struct Random(pub Pcg32);
 
-/// A constant or random value.
+/// Utility trait to help implementing [`std::hash::Hash`] for [`CpuValue`] of
+/// floating-point type.
+pub trait FloatHash: PartialEq {
+    fn hash_f32<H: Hasher>(&self, state: &mut H);
+}
+
+impl FloatHash for f32 {
+    fn hash_f32<H: Hasher>(&self, state: &mut H) {
+        FloatOrd(*self).hash(state);
+    }
+}
+
+impl FloatHash for Vec2 {
+    fn hash_f32<H: Hasher>(&self, state: &mut H) {
+        FloatOrd(self.x).hash(state);
+        FloatOrd(self.y).hash(state);
+    }
+}
+
+impl FloatHash for Vec3 {
+    fn hash_f32<H: Hasher>(&self, state: &mut H) {
+        FloatOrd(self.x).hash(state);
+        FloatOrd(self.y).hash(state);
+        FloatOrd(self.z).hash(state);
+    }
+}
+
+impl FloatHash for Vec4 {
+    fn hash_f32<H: Hasher>(&self, state: &mut H) {
+        FloatOrd(self.x).hash(state);
+        FloatOrd(self.y).hash(state);
+        FloatOrd(self.z).hash(state);
+        FloatOrd(self.w).hash(state);
+    }
+}
+
+/// A constant or random value evaluated on CPU.
 ///
 /// This enum represents a value which is either constant, or randomly sampled
 /// according to a given probability distribution.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Reflect)]
+///
+/// Not to be confused with [`graph::Value`]. This [`CpuValue`] is a legacy type
+/// that will be eventually replaced with a [`graph::Value`] once evaluation of
+/// the latter can be emulated on CPU, which is required for use
+/// with the [`Spawner`].
+///
+/// [`graph::Value`]: crate::graph::Value
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Reflect)]
 #[non_exhaustive]
-pub enum Value<T: Copy + FromReflect> {
+pub enum CpuValue<T: Copy + FromReflect> {
     /// Single constant value.
     Single(T),
     /// Random value distributed uniformly between two inclusive bounds.
@@ -34,21 +79,21 @@ pub enum Value<T: Copy + FromReflect> {
     /// The minimum bound must be less than or equal to the maximum one,
     /// otherwise some methods like [`sample()`] will panic.
     ///
-    /// [`sample()`]: crate::Value::sample
+    /// [`sample()`]: crate::CpuValue::sample
     Uniform((T, T)),
 }
 
-impl<T: Copy + FromReflect + Default> Default for Value<T> {
+impl<T: Copy + FromReflect + Default> Default for CpuValue<T> {
     fn default() -> Self {
         Self::Single(T::default())
     }
 }
 
-impl<T: Copy + FromReflect + SampleUniform> Value<T> {
+impl<T: Copy + FromReflect + SampleUniform> CpuValue<T> {
     /// Sample the value.
-    /// - For [`Value::Single`], always return the same single value.
-    /// - For [`Value::Uniform`], use the given pseudo-random number generator
-    ///   to generate a random sample.
+    /// - For [`CpuValue::Single`], always return the same single value.
+    /// - For [`CpuValue::Uniform`], use the given pseudo-random number
+    ///   generator to generate a random sample.
     pub fn sample(&self, rng: &mut Pcg32) -> T {
         match self {
             Self::Single(x) => *x,
@@ -57,9 +102,9 @@ impl<T: Copy + FromReflect + SampleUniform> Value<T> {
     }
 }
 
-impl<T: Copy + FromReflect + PartialOrd> Value<T> {
+impl<T: Copy + FromReflect + PartialOrd> CpuValue<T> {
     /// Returns the range of allowable values in the form `[minimum, maximum]`.
-    /// For [`Value::Single`], both values are the same.
+    /// For [`CpuValue::Single`], both values are the same.
     pub fn range(&self) -> [T; 2] {
         match self {
             Self::Single(x) => [*x; 2],
@@ -74,71 +119,26 @@ impl<T: Copy + FromReflect + PartialOrd> Value<T> {
     }
 }
 
-impl<T: Copy + FromReflect> From<T> for Value<T> {
+impl<T: Copy + FromReflect> From<T> for CpuValue<T> {
     fn from(t: T) -> Self {
         Self::Single(t)
     }
 }
 
-/// Dimension-variable floating-point [`Value`].
-///
-/// This enum represents a floating-point [`Value`] whose dimension (number of
-/// components) is variable. This is mainly used where a modifier can work with
-/// multiple attribute variants like [`Attribute::SIZE`] and
-/// [`Attribute::SIZE2`] which conceptually both represent the particle size,
-/// but with different representations.
-///
-/// [`Attribute::SIZE`]: crate::Attribute::SIZE
-/// [`Attribute::SIZE2`]: crate::Attribute::SIZE2
-#[derive(Debug, Clone, Copy, PartialEq, Reflect, Serialize, Deserialize)]
-pub enum DimValue {
-    /// Scalar.
-    D1(Value<f32>),
-    /// 2D vector.
-    D2(Value<Vec2>),
-    /// 3D vector.
-    D3(Value<Vec3>),
-    /// 4D vector.
-    D4(Value<Vec4>),
-}
+impl<T: Copy + FromReflect + FloatHash> Eq for CpuValue<T> {}
 
-impl Default for DimValue {
-    fn default() -> Self {
-        DimValue::D1(Value::<f32>::default())
-    }
-}
-
-impl From<Value<f32>> for DimValue {
-    fn from(value: Value<f32>) -> Self {
-        DimValue::D1(value)
-    }
-}
-
-impl From<Value<Vec2>> for DimValue {
-    fn from(value: Value<Vec2>) -> Self {
-        DimValue::D2(value)
-    }
-}
-
-impl From<Value<Vec3>> for DimValue {
-    fn from(value: Value<Vec3>) -> Self {
-        DimValue::D3(value)
-    }
-}
-
-impl From<Value<Vec4>> for DimValue {
-    fn from(value: Value<Vec4>) -> Self {
-        DimValue::D4(value)
-    }
-}
-
-impl ToWgslString for DimValue {
-    fn to_wgsl_string(&self) -> String {
+impl<T: Copy + FromReflect + FloatHash> Hash for CpuValue<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            DimValue::D1(s) => s.to_wgsl_string(),
-            DimValue::D2(v) => v.to_wgsl_string(),
-            DimValue::D3(v) => v.to_wgsl_string(),
-            DimValue::D4(v) => v.to_wgsl_string(),
+            CpuValue::Single(f) => {
+                1_u8.hash(state);
+                f.hash_f32(state);
+            }
+            CpuValue::Uniform((a, b)) => {
+                2_u8.hash(state);
+                a.hash_f32(state);
+                b.hash_f32(state);
+            }
         }
     }
 }
@@ -158,15 +158,15 @@ pub struct Spawner {
     /// Number of particles to spawn over [`spawn_time`].
     ///
     /// [`spawn_time`]: Spawner::spawn_time
-    num_particles: Value<f32>,
+    num_particles: CpuValue<f32>,
 
     /// Time over which to spawn `num_particles`, in seconds.
-    spawn_time: Value<f32>,
+    spawn_time: CpuValue<f32>,
 
     /// Time between bursts of the particle system, in seconds.
     /// If this is infinity, there's only one burst.
     /// If this is `spawn_time`, the system spawns a steady stream of particles.
-    period: Value<f32>,
+    period: CpuValue<f32>,
 
     /// Whether the system is active at startup. The value is used to initialize
     /// [`EffectSpawner::active`].
@@ -228,7 +228,7 @@ impl Spawner {
     /// [`once()`]: crate::Spawner::once
     /// [`burst()`]: crate::Spawner::burst
     /// [`rate()`]: crate::Spawner::rate
-    pub fn new(count: Value<f32>, time: Value<f32>, period: Value<f32>) -> Self {
+    pub fn new(count: CpuValue<f32>, time: CpuValue<f32>, period: CpuValue<f32>) -> Self {
         assert!(
             period.range()[0] >= 0.,
             "`period` must not generate negative numbers (period.min was {}, expected >= 0).",
@@ -257,8 +257,8 @@ impl Spawner {
     /// When `spawn_immediately == true`, this is a convenience for:
     ///
     /// ```
-    /// # use bevy_hanabi::{Spawner, Value};
-    /// # let count = Value::Single(1.);
+    /// # use bevy_hanabi::{Spawner, CpuValue};
+    /// # let count = CpuValue::Single(1.);
     /// Spawner::new(count, 0.0.into(), f32::INFINITY.into());
     /// ```
     ///
@@ -271,7 +271,7 @@ impl Spawner {
     /// ```
     ///
     /// [`reset()`]: crate::Spawner::reset
-    pub fn once(count: Value<f32>, spawn_immediately: bool) -> Self {
+    pub fn once(count: CpuValue<f32>, spawn_immediately: bool) -> Self {
         let mut spawner = Self::new(count, 0.0.into(), f32::INFINITY.into());
         spawner.starts_immediately = spawn_immediately;
         spawner
@@ -279,7 +279,7 @@ impl Spawner {
 
     /// Get whether this spawner emits a single burst.
     pub fn is_once(&self) -> bool {
-        if let Value::Single(f) = self.period {
+        if let CpuValue::Single(f) = self.period {
             f.is_infinite()
         } else {
             false
@@ -292,8 +292,8 @@ impl Spawner {
     /// This is a convenience for:
     ///
     /// ```
-    /// # use bevy_hanabi::{Spawner, Value};
-    /// # let rate = Value::Single(1.);
+    /// # use bevy_hanabi::{Spawner, CpuValue};
+    /// # let rate = CpuValue::Single(1.);
     /// Spawner::new(rate, 1.0.into(), 1.0.into());
     /// ```
     ///
@@ -304,7 +304,7 @@ impl Spawner {
     /// // Spawn 10 particles per second, indefinitely.
     /// let spawner = Spawner::rate(10.0.into());
     /// ```
-    pub fn rate(rate: Value<f32>) -> Self {
+    pub fn rate(rate: CpuValue<f32>) -> Self {
         Self::new(rate, 1.0.into(), 1.0.into())
     }
 
@@ -314,9 +314,9 @@ impl Spawner {
     /// This is a convenience for:
     ///
     /// ```
-    /// # use bevy_hanabi::{Spawner, Value};
-    /// # let count = Value::Single(1.);
-    /// # let period = Value::Single(1.);
+    /// # use bevy_hanabi::{Spawner, CpuValue};
+    /// # let count = CpuValue::Single(1.);
+    /// # let period = CpuValue::Single(1.);
     /// Spawner::new(count, 0.0.into(), period);
     /// ```
     ///
@@ -327,7 +327,7 @@ impl Spawner {
     /// // Spawn a burst of 5 particles every 3 seconds, indefinitely.
     /// let spawner = Spawner::burst(5.0.into(), 3.0.into());
     /// ```
-    pub fn burst(count: Value<f32>, period: Value<f32>) -> Self {
+    pub fn burst(count: CpuValue<f32>, period: CpuValue<f32>) -> Self {
         Self::new(count, 0.0.into(), period)
     }
 
@@ -546,12 +546,18 @@ impl EffectSpawner {
 /// Tick all the spawners of the visible [`ParticleEffect`] components.
 ///
 /// This system runs in the [`PostUpdate`] stage, after the visibility system
-/// has updated the [`ComputedVisibility`] of each effect instance (see
-/// [`VisibilitySystems::CheckVisibility`]). Hidden instances are not updated,
-/// unless the [`EffectAsset::simulation_condition`] is set to
-/// [`SimulationCondition::Always`].
+/// has updated the [`InheritedVisibility`] of each effect instance (see
+/// [`VisibilitySystems::VisibilityPropagate`]). Hidden instances are not
+/// updated, unless the [`EffectAsset::simulation_condition`]
+/// is set to [`SimulationCondition::Always`].
 ///
-/// [`VisibilitySystems::CheckVisibility`]: bevy::render::view::VisibilitySystems::CheckVisibility
+/// Note that by that point the [`ViewVisibility`] is not yet calculated, and it
+/// may happen that spawners are ticked but no effect is visible in any view
+/// even though some are "visible" (active) in the [`World`]. The actual
+/// per-view culling of invisible (not in view) effects is performed later on
+/// the render world.
+///
+/// [`VisibilitySystems::VisibilityPropagate`]: bevy::render::view::VisibilitySystems::VisibilityPropagate
 /// [`EffectAsset::simulation_condition`]: crate::EffectAsset::simulation_condition
 pub fn tick_spawners(
     mut commands: Commands,
@@ -561,7 +567,7 @@ pub fn tick_spawners(
     mut query: Query<(
         Entity,
         &ParticleEffect,
-        Option<&ComputedVisibility>,
+        Option<&InheritedVisibility>,
         Option<&mut EffectSpawner>,
     )>,
 ) {
@@ -569,17 +575,19 @@ pub fn tick_spawners(
 
     let dt = time.delta_seconds();
 
-    for (entity, effect, maybe_computed_visibility, maybe_spawner) in query.iter_mut() {
+    for (entity, effect, maybe_inherited_visibility, maybe_spawner) in query.iter_mut() {
         // TODO - maybe cache simulation_condition so we don't need to unconditionally
         // query the asset?
-        let Some(asset) = effects.get(&effect.handle) else { continue; };
+        let Some(asset) = effects.get(&effect.handle) else {
+            continue;
+        };
 
-        if asset.simulation_condition == SimulationCondition::WhenVisible {
-            if let Some(computed_visibility) = maybe_computed_visibility {
-                if !computed_visibility.is_visible() {
-                    continue;
-                }
-            }
+        if asset.simulation_condition == SimulationCondition::WhenVisible
+            && !maybe_inherited_visibility
+                .map(|iv| iv.get())
+                .unwrap_or(true)
+        {
+            continue;
         }
 
         if let Some(mut spawner) = maybe_spawner {
@@ -597,11 +605,18 @@ mod test {
     use std::time::Duration;
 
     use bevy::{
+        asset::{
+            io::{
+                memory::{Dir, MemoryAssetReader},
+                AssetSourceBuilder, AssetSourceBuilders, AssetSourceId,
+            },
+            AssetServerMode,
+        },
         render::view::{VisibilityPlugin, VisibilitySystems},
-        tasks::IoTaskPool,
+        tasks::{IoTaskPool, TaskPoolBuilder},
     };
 
-    use crate::{test_utils::DummyAssetIo, Module};
+    use crate::Module;
 
     use super::*;
 
@@ -615,19 +630,19 @@ mod test {
 
     #[test]
     fn test_range_single() {
-        let value = Value::Single(1.0);
+        let value = CpuValue::Single(1.0);
         assert_eq!(value.range(), [1.0, 1.0]);
     }
 
     #[test]
     fn test_range_uniform() {
-        let value = Value::Uniform((1.0, 3.0));
+        let value = CpuValue::Uniform((1.0, 3.0));
         assert_eq!(value.range(), [1.0, 3.0]);
     }
 
     #[test]
     fn test_range_uniform_reverse() {
-        let value = Value::Uniform((3.0, 1.0));
+        let value = CpuValue::Uniform((3.0, 1.0));
         assert_eq!(value.range(), [1.0, 3.0]);
     }
 
@@ -648,13 +663,13 @@ mod test {
     #[test]
     #[should_panic]
     fn test_new_panic_negative_period() {
-        let _ = Spawner::new(3.0.into(), 1.0.into(), Value::Uniform((-1., 1.)));
+        let _ = Spawner::new(3.0.into(), 1.0.into(), CpuValue::Uniform((-1., 1.)));
     }
 
     #[test]
     #[should_panic]
     fn test_new_panic_zero_period() {
-        let _ = Spawner::new(3.0.into(), 1.0.into(), Value::Uniform((0., 0.)));
+        let _ = Spawner::new(3.0.into(), 1.0.into(), CpuValue::Uniform((0., 0.)));
     }
 
     #[test]
@@ -760,17 +775,34 @@ mod test {
     }
 
     fn make_test_app() -> App {
-        IoTaskPool::init(Default::default);
-        let asset_server = AssetServer::new(DummyAssetIo {});
+        IoTaskPool::get_or_init(|| {
+            TaskPoolBuilder::default()
+                .num_threads(1)
+                .thread_name("Hanabi test IO Task Pool".to_string())
+                .build()
+        });
 
         let mut app = App::new();
+
+        let watch_for_changes = false;
+        let mut builders = app
+            .world
+            .get_resource_or_insert_with::<AssetSourceBuilders>(Default::default);
+        let dir = Dir::default();
+        let dummy_builder = AssetSourceBuilder::default()
+            .with_reader(move || Box::new(MemoryAssetReader { root: dir.clone() }));
+        builders.insert(AssetSourceId::Default, dummy_builder);
+        let sources = builders.build_sources(watch_for_changes, false);
+        let asset_server =
+            AssetServer::new(sources, AssetServerMode::Unprocessed, watch_for_changes);
+
         app.insert_resource(asset_server);
         // app.add_plugins(DefaultPlugins);
-        app.add_asset::<Mesh>();
+        app.init_asset::<Mesh>();
         app.add_plugins(VisibilityPlugin);
         app.init_resource::<Time>();
         app.insert_resource(Random(new_rng()));
-        app.add_asset::<EffectAsset>();
+        app.init_asset::<EffectAsset>();
         app.add_systems(
             PostUpdate,
             tick_spawners.after(VisibilitySystems::CheckVisibility),
@@ -842,7 +874,7 @@ mod test {
                     world
                         .spawn((
                             visibility,
-                            ComputedVisibility::default(),
+                            InheritedVisibility::default(),
                             ParticleEffect {
                                 handle: handle.clone(),
                                 spawner: test_case.instance_spawner,
@@ -873,11 +905,7 @@ mod test {
                 // `Time::delta_seconds()` only update after the *second* update. So we tick the
                 // `Time` twice here to enforce this.
                 let mut time = app.world.resource_mut::<Time>();
-                let start = time.startup();
-                // Force a zero-length update the first time around, otherwise the accumulated
-                // delta-time is different from the absolute elapsed time, which makes no sense.
-                time.update_with_instant(start);
-                time.update_with_instant(start + Duration::from_millis(16));
+                time.advance_by(Duration::from_millis(16));
                 time.elapsed()
             };
             app.update();
@@ -888,12 +916,12 @@ mod test {
             if let Some(test_visibility) = test_case.visibility {
                 // Simulated-when-visible effect (SimulationCondition::WhenVisible)
 
-                let (entity, visibility, computed_visibility, particle_effect, effect_spawner) =
+                let (entity, visibility, inherited_visibility, particle_effect, effect_spawner) =
                     world
                         .query::<(
                             Entity,
                             &Visibility,
-                            &ComputedVisibility,
+                            &InheritedVisibility,
                             &ParticleEffect,
                             Option<&EffectSpawner>,
                         )>()
@@ -903,11 +931,11 @@ mod test {
                 assert_eq!(entity, effect_entity);
                 assert_eq!(visibility, test_visibility);
                 assert_eq!(
-                    computed_visibility.is_visible(),
+                    inherited_visibility.get(),
                     test_visibility == Visibility::Visible
                 );
                 assert_eq!(particle_effect.handle, handle);
-                if computed_visibility.is_visible() {
+                if inherited_visibility.get() {
                     // If visible, `tick_spawners()` spawns the EffectSpawner and ticks it
                     assert!(effect_spawner.is_some());
                     let effect_spawner = effect_spawner.unwrap();

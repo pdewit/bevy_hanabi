@@ -6,9 +6,13 @@
 //! The attractor also conforms the particles that are close to a sphere around
 //! it.
 //!
-//! The example also demonstrates the `AabbKillModifier` through two boxes: a
-//! green "allow" box to which particles are confined, and a red "forbid" box
-//! killing all particles entering it.
+//! The example also demonstrates the `KillAabbModifier` and
+//! `KillSphereModifier`: a green "allow" box to which particles are confined,
+//! and a red "forbid" sphere killing all particles entering it.
+//!
+//! Note: Some particles may _appear_ to penetrate the red "forbid" sphere due
+//! to the projection on screen; however those particles are actually at a
+//! different depth, in front or behind the sphere.
 
 use bevy::{
     core_pipeline::tonemapping::Tonemapping,
@@ -18,7 +22,7 @@ use bevy::{
         camera::Projection, render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
     },
 };
-// use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use bevy_hanabi::prelude::*;
 
@@ -39,15 +43,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DefaultPlugins
                 .set(LogPlugin {
                     level: bevy::log::Level::WARN,
-                    filter: "bevy_hanabi=warn,spawn=trace".to_string(),
+                    filter: "bevy_hanabi=warn,force_field=trace".to_string(),
                 })
-                .set(RenderPlugin { wgpu_settings }),
+                .set(RenderPlugin {
+                    render_creation: wgpu_settings.into(),
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "🎆 Hanabi — force field".to_string(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
         )
         //.add_plugins(LookTransformPlugin)
         //.add_plugins(OrbitCameraPlugin::default())
         .add_plugins(HanabiPlugin)
-        // Have to wait for update.
-        // .add_plugins(WorldInspectorPlugin::default())
+        .add_plugins(WorldInspectorPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(Update, (bevy::window::close_on_esc, update))
         .run();
@@ -121,22 +133,26 @@ fn setup(
         material: materials.add(StandardMaterial {
             base_color: Color::rgba(0., 0.7, 0., 0.3),
             unlit: true,
-            alpha_mode: AlphaMode::Blend,
+            alpha_mode: bevy::pbr::AlphaMode::Blend,
             ..Default::default()
         }),
         ..Default::default()
     });
 
-    // "forbid" box
+    // "forbid" sphere
     commands.spawn(PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Box::new(0.8, 0.4, 6.))),
+        mesh: meshes.add(Mesh::from(shape::UVSphere {
+            radius: 0.6,
+            sectors: 32,
+            stacks: 8,
+        })),
         material: materials.add(StandardMaterial {
             base_color: Color::rgba(0.7, 0., 0., 0.3),
             unlit: true,
-            alpha_mode: AlphaMode::Blend,
+            alpha_mode: bevy::pbr::AlphaMode::Blend,
             ..Default::default()
         }),
-        transform: Transform::from_translation(Vec3::new(-2., -1., 0.)),
+        transform: Transform::from_translation(Vec3::new(-2., -1., 0.1)),
         ..Default::default()
     });
 
@@ -152,30 +168,39 @@ fn setup(
 
     let writer = ExprWriter::new();
 
+    let age = writer.lit(0.).expr();
+    let init_age = SetAttributeModifier::new(Attribute::AGE, age);
+
     let lifetime = writer.lit(5.).expr();
-    let init_lifetime = InitAttributeModifier::new(Attribute::LIFETIME, lifetime);
+    let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let center = writer.lit(Vec3::ZERO).expr();
     let half_size = writer.lit(Vec3::new(3., 2., 3.)).expr();
-    let allow_zone = AabbKillModifier::new(center, half_size);
+    let allow_zone = KillAabbModifier::new(center, half_size);
 
     let center = writer.lit(Vec3::new(-2., -1., 0.)).expr();
-    let half_size = writer.lit(Vec3::new(0.4, 0.2, 3.)).expr();
-    let deny_zone = AabbKillModifier::new(center, half_size).with_kill_inside(true);
+    let radius = writer.lit(0.6);
+    let sqr_radius = (radius.clone() * radius).expr();
+    let deny_zone = KillSphereModifier::new(center, sqr_radius).with_kill_inside(true);
+
+    let init_pos = SetPositionSphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        radius: writer.lit(BALL_RADIUS).expr(),
+        dimension: ShapeDimension::Surface,
+    };
+
+    let init_vel = SetVelocitySphereModifier {
+        center: writer.lit(Vec3::ZERO).expr(),
+        speed: (writer.rand(ScalarType::Float) * writer.lit(0.2) + writer.lit(0.1)).expr(),
+    };
 
     // Force field effects
     let effect = effects.add(
         EffectAsset::new(32768, spawner, writer.finish())
             .with_name("force_field")
-            .init(InitPositionSphereModifier {
-                center: Vec3::ZERO,
-                radius: BALL_RADIUS,
-                dimension: ShapeDimension::Surface,
-            })
-            .init(InitVelocitySphereModifier {
-                center: Vec3::ZERO,
-                speed: Value::Uniform((0.1, 0.3)),
-            })
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
             .init(init_lifetime)
             .update(ForceFieldModifier::new(vec![
                 ForceFieldSource {
@@ -219,7 +244,9 @@ fn update(
     // Note: On first frame where the effect spawns, EffectSpawner is spawned during
     // CoreSet::PostUpdate, so will not be available yet. Ignore for a frame if
     // so.
-    let Ok((mut spawner, mut effect_transform)) = q_effect.get_single_mut() else { return; };
+    let Ok((mut spawner, mut effect_transform)) = q_effect.get_single_mut() else {
+        return;
+    };
 
     let (camera, camera_transform) = camera_query.single();
 

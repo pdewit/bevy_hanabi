@@ -1,7 +1,7 @@
 #[cfg(feature = "2d")]
 use bevy::core_pipeline::core_2d::Transparent2d;
 #[cfg(feature = "3d")]
-use bevy::core_pipeline::core_3d::Transparent3d;
+use bevy::core_pipeline::core_3d::{AlphaMask3d, Transparent3d};
 use bevy::{
     prelude::*,
     render::{
@@ -9,7 +9,7 @@ use bevy::{
         render_phase::DrawFunctions,
         render_resource::{SpecializedComputePipelines, SpecializedRenderPipelines},
         renderer::{RenderAdapterInfo, RenderDevice},
-        view::visibility::VisibilitySystems,
+        view::{prepare_view_uniforms, visibility::VisibilitySystems},
         Render, RenderApp, RenderSet,
     },
 };
@@ -18,13 +18,14 @@ use crate::{
     asset::EffectAsset,
     compile_effects, gather_removed_effects,
     render::{
-        extract_effect_events, extract_effects, prepare_effects, queue_effects,
+        extract_effect_events, extract_effects, prepare_effects, prepare_resources, queue_effects,
         DispatchIndirectPipeline, DrawEffects, EffectAssetEvents, EffectBindGroups, EffectSystems,
         EffectsMeta, ExtractedEffects, ParticlesInitPipeline, ParticlesRenderPipeline,
         ParticlesUpdatePipeline, ShaderCache, SimParams, VfxSimulateDriverNode, VfxSimulateNode,
     },
     spawn::{self, Random},
-    tick_spawners, ParticleEffect, RemovedEffectsEvent, Spawner,
+    tick_spawners, update_properties_from_asset, EffectProperties, ParticleEffect,
+    RemovedEffectsEvent, Spawner,
 };
 
 #[cfg(feature = "serde")]
@@ -55,7 +56,7 @@ pub struct HanabiPlugin;
 impl Plugin for HanabiPlugin {
     fn build(&self, app: &mut App) {
         // Register asset
-        app.add_asset::<EffectAsset>()
+        app.init_asset::<EffectAsset>()
             .add_event::<RemovedEffectsEvent>()
             .insert_resource(Random(spawn::new_rng()))
             .init_resource::<ShaderCache>()
@@ -65,19 +66,21 @@ impl Plugin for HanabiPlugin {
                     EffectSystems::TickSpawners
                         // This checks the visibility to skip work, so needs to run after
                         // ComputedVisibility was updated.
-                        .after(VisibilitySystems::CheckVisibility),
-                    EffectSystems::CompileEffects
-                        // This checks the visibility to skip work, so needs to run after
-                        // ComputedVisibility was updated.
-                        .after(VisibilitySystems::CheckVisibility),
+                        .after(VisibilitySystems::VisibilityPropagate),
+                    EffectSystems::CompileEffects,
                     EffectSystems::GatherRemovedEffects,
                 ),
+            )
+            .configure_sets(
+                bevy::asset::UpdateAssets,
+                EffectSystems::UpdatePropertiesFromAsset.after(bevy::asset::TrackAssets),
             )
             .add_systems(
                 PostUpdate,
                 (
                     tick_spawners.in_set(EffectSystems::TickSpawners),
                     compile_effects.in_set(EffectSystems::CompileEffects),
+                    update_properties_from_asset.in_set(EffectSystems::UpdatePropertiesFromAsset),
                     gather_removed_effects.in_set(EffectSystems::GatherRemovedEffects),
                 ),
             );
@@ -85,10 +88,11 @@ impl Plugin for HanabiPlugin {
         #[cfg(feature = "serde")]
         app.init_asset_loader::<EffectAssetLoader>();
 
-        // Register the component reflection
-        app.register_type::<EffectAsset>();
-        app.register_type::<ParticleEffect>();
-        app.register_type::<Spawner>();
+        // Register types with reflection
+        app.register_type::<EffectAsset>()
+            .register_type::<ParticleEffect>()
+            .register_type::<EffectProperties>()
+            .register_type::<Spawner>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -134,8 +138,9 @@ impl Plugin for HanabiPlugin {
             .configure_sets(
                 Render,
                 (
-                    EffectSystems::PrepareEffects.in_set(RenderSet::Prepare),
+                    EffectSystems::PrepareEffectAssets.in_set(RenderSet::PrepareAssets),
                     EffectSystems::QueueEffects.in_set(RenderSet::Queue),
+                    EffectSystems::PrepareEffectGpuResources.in_set(RenderSet::Prepare),
                 ),
             )
             .edit_schedule(ExtractSchedule, |schedule| {
@@ -144,8 +149,11 @@ impl Plugin for HanabiPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_effects.in_set(EffectSystems::PrepareEffects),
+                    prepare_effects.in_set(EffectSystems::PrepareEffectAssets),
                     queue_effects.in_set(EffectSystems::QueueEffects),
+                    prepare_resources
+                        .in_set(EffectSystems::PrepareEffectGpuResources)
+                        .after(prepare_view_uniforms),
                 ),
             );
 
@@ -169,6 +177,14 @@ impl Plugin for HanabiPlugin {
             render_app
                 .world
                 .get_resource::<DrawFunctions<Transparent3d>>()
+                .unwrap()
+                .write()
+                .add(draw_particles);
+
+            let draw_particles = DrawEffects::new(&mut render_app.world);
+            render_app
+                .world
+                .get_resource::<DrawFunctions<AlphaMask3d>>()
                 .unwrap()
                 .write()
                 .add(draw_particles);
